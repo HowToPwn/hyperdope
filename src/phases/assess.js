@@ -1,48 +1,66 @@
+import { calculateScore, extractVector, severity as cvssLabel } from '../cvss.js';
+import { extractJson } from '../extract.js';
+
 export const BUILT_IN = {
-  system: `You are a CVSSv3.1 scoring expert and CWE classification specialist. You score vulnerabilities with precision, using chain-of-thought reasoning before committing to a numeric score.
+  system: `You are a CVSSv3.1 scoring expert and CWE classification specialist. You produce precise, defensible scores by reasoning through each CVSS v3.1 metric before committing to a vector string. Your output will be verified mathematically — do not guess at the numeric score, focus on getting the vector string right.
 
-CVSS v3.1 metric reasoning process — work through each metric before scoring:
+─── CVSS v3.1 METRIC REASONING ─────────────────────────────────────────────────
 
-**Attack Vector (AV)**: Network (N) / Adjacent (A) / Local (L) / Physical (P)
-- N: exploitable remotely over internet/intranet
-- A: requires attacker on same network segment
-- L: requires local access (logged-in user)
-- P: requires physical device access
+Work through each metric explicitly:
 
-**Attack Complexity (AC)**: Low (L) / High (H)
-- L: no special conditions, repeatable
-- H: requires specific race condition, configuration, or non-default state
+**Attack Vector (AV)** — how far away can the attacker be?
+- N (Network): exploitable remotely over the internet or an intranet, no physical proximity required
+- A (Adjacent): requires the attacker to be on the same network segment, Bluetooth range, or local subnet
+- L (Local): requires local OS access — logged-in user, local shell, cron job
+- P (Physical): requires physical access to the device
 
-**Privileges Required (PR)**: None (N) / Low (L) / High (H)
-- N: unauthenticated attacker
-- L: normal user account
-- H: admin/root
+**Attack Complexity (AC)** — are special conditions required beyond attacker control?
+- L (Low): no special conditions, attack is repeatable and reliable
+- H (High): attacker must gather target-specific information, exploit a race condition, or work around non-default configuration
 
-**User Interaction (UI)**: None (N) / Required (R)
-- N: no victim action needed
-- R: victim must click, visit, or act
+**Privileges Required (PR)** — what account level does the attacker need?
+- N (None): unauthenticated; no account needed
+- L (Low): standard unprivileged account (regular user, viewer role)
+- H (High): admin, root, or privileged service account
 
-**Scope (S)**: Unchanged (U) / Changed (C)
-- U: impact confined to vulnerable component
-- C: impact spreads to other components/systems
+**User Interaction (UI)** — does a victim need to act?
+- N (None): no victim action; the attacker operates independently
+- R (Required): victim must click a link, open a file, visit a URL, or take some action
 
-**Confidentiality Impact (C)**: None (N) / Low (L) / High (H)
-**Integrity Impact (I)**: None (N) / Low (L) / High (H)
-**Availability Impact (A)**: None (N) / Low (L) / High (H)
+**Scope (S)** — does the impact escape the vulnerable component?
+- U (Unchanged): impact confined to the vulnerable component itself
+- C (Changed): exploiting the vulnerability affects other components (e.g., container escape → host OS)
 
-Severity thresholds:
-- Critical: 9.0–10.0
-- High: 7.0–8.9
-- Medium: 4.0–6.9
-- Low: 0.1–3.9
-- None: 0.0
+Note: PR weights differ by Scope (S=U: N=0.85/L=0.62/H=0.27; S=C: N=0.85/L=0.68/H=0.50)
 
-CWE classification: identify the most specific applicable CWE, not a parent category.
+**Confidentiality Impact (C)** — how much data is exposed?
+- N: no data disclosed
+- L: limited data exposed, no control over what is accessed
+- H: total loss of confidentiality, or complete disclosure of sensitive data
 
-Output format — reason first, then JSON:
+**Integrity Impact (I)** — can data be modified?
+- N: no modification possible
+- L: some data can be modified, but attacker has limited control over scope
+- H: total loss of integrity, or arbitrary modification of any data
+
+**Availability Impact (A)** — can the system be disrupted?
+- N: no impact on availability
+- L: reduced performance, some service interruption
+- H: total denial of service, complete resource exhaustion
+
+─── CWE CLASSIFICATION ──────────────────────────────────────────────────────────
+
+Identify the most specific CWE — not a category node. Examples of specific vs. parent:
+- NOT CWE-20 (Improper Input Validation) → USE CWE-89 (SQL Injection) or CWE-78 (OS Command Injection)
+- NOT CWE-693 (Protection Mechanism Failure) → USE CWE-284 (Improper Access Control) or CWE-862 (Missing Authorization)
+- NOT CWE-119 (Buffer Error) → USE CWE-787 (Out-of-bounds Write) or CWE-125 (Out-of-bounds Read)
+
+─── OUTPUT FORMAT ───────────────────────────────────────────────────────────────
+
+First, write out your CVSS reasoning for each metric. Then output the Assessment JSON:
 
 ## CVSS Reasoning
-[Walk through each metric with justification]
+[For each finding: reason through AV/AC/PR/UI/S/C/I/A with one sentence each. End with the vector string.]
 
 ## Assessment JSON
 \`\`\`json
@@ -50,20 +68,19 @@ Output format — reason first, then JSON:
   "vulnerability_id": "<from audit>",
   "title": "<short title>",
   "cvss_vector": "CVSS:3.1/AV:_/AC:_/PR:_/UI:_/S:_/C:_/I:_/A:_",
-  "cvss_score": <numeric 0.0-10.0>,
-  "severity": "Critical|High|Medium|Low|None",
+  "cvss_score": "<leave as 0 — will be computed from vector>",
+  "severity": "<will be computed from vector>",
   "cwe_id": "CWE-XXX",
-  "cwe_name": "<full CWE name>",
-  "exploitability_subscore": <0.0-3.9>,
-  "impact_subscore": <0.0-6.0>,
-  "epss_estimate": "<low|medium|high — estimated probability of exploitation in the wild>",
+  "cwe_name": "<full CWE name, not category>",
+  "epss_estimate": "low|medium|high",
   "affected_versions": "<version range or 'unknown'>",
   "patch_complexity": "trivial|moderate|complex",
-  "notes": "<any scoring caveats or assumptions>"
+  "remediation_hint": "<one specific code-level or config-level fix>",
+  "notes": "<scoring caveats or assumptions>"
 }
 \`\`\``,
 
-  user_prefix: `Score the following vulnerability finding using CVSS v3.1 and classify its CWE:\n\n`,
+  user_prefix: `Score the following vulnerability findings using CVSS v3.1. Reason through each metric.\n\n`,
 };
 
 export async function runAssess({ config, target, context, callProvider, phaseConfig }) {
@@ -82,18 +99,39 @@ export async function runAssess({ config, target, context, callProvider, phaseCo
 
   const raw = await callProvider(config, { system, user });
 
+  // Extract structured finding(s) from the LLM response
   let findings = [];
   try {
-    // prefer fenced code block; fall back to bare JSON object
-    const fenced = raw.match(/```json\s*([\s\S]*?)```/);
-    const bare = raw.match(/\{[\s\S]*\}/);
-    const src = fenced ? fenced[1].trim() : bare ? bare[0] : null;
-    if (src) {
-      const parsed = JSON.parse(src);
-      findings = Array.isArray(parsed) ? parsed : [parsed];
-    }
+    const parsed = extractJson(raw);
+    if (parsed) findings = Array.isArray(parsed) ? parsed : [parsed];
   } catch {
     // preserve raw
+  }
+
+  // Override scores with mathematically verified values
+  const vector = extractVector(raw);
+  if (vector) {
+    const score = calculateScore(vector);
+    const label = cvssLabel(score);
+    findings = findings.map(f => ({
+      ...f,
+      cvss_vector: vector,
+      cvss_score: score,
+      severity: label,
+      cvss_verified: true,
+    }));
+    // If no structured findings were parsed, synthesize one from the vector
+    if (findings.length === 0) {
+      findings = [{
+        cvss_vector: vector,
+        cvss_score: score,
+        severity: label,
+        cvss_verified: true,
+      }];
+    }
+  } else {
+    // Mark all findings as unverified
+    findings = findings.map(f => ({ ...f, cvss_verified: false }));
   }
 
   return {

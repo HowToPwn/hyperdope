@@ -1,14 +1,54 @@
 {
   "name": "hyperdope",
-  "version": "0.1.0",
-  "description": "MCP server for adversarial security research - 6-phase pipeline from profile to disclosure",
+  "version": "0.2.0",
+  "description": "MCP server for adversarial security research — 6-phase pipeline from profile to disclosure",
   "type": "module",
   "bin": {
-    "hyperdope": "./bin/hyperdope.js"
+    "hyperdope": "bin/hyperdope.js"
   },
   "scripts": {
-    "start": "node bin/hyperdope.js"
+    "start": "node bin/hyperdope.js",
+    "test": "node --test test/*.test.js",
+    "lint": "node --check bin/hyperdope.js src/server.js src/config.js src/session.js src/cvss.js src/retry.js src/context.js src/extract.js src/providers/index.js src/providers/claude.js src/providers/openai.js src/providers/gemini.js src/providers/ollama.js src/phases/index.js src/phases/profile.js src/phases/audit.js src/phases/confirm.js src/phases/assess.js src/phases/draft_ghsa.js src/phases/disclose.js src/phases/scan.js"
   },
+  "keywords": [
+    "mcp",
+    "security",
+    "vulnerability",
+    "research",
+    "pentest",
+    "cvss",
+    "ghsa",
+    "osv",
+    "disclosure",
+    "claude",
+    "llm"
+  ],
+  "author": "HowToPwn",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HowToPwn/hyperdope.git"
+  },
+  "homepage": "https://github.com/HowToPwn/hyperdope#readme",
+  "bugs": {
+    "url": "https://github.com/HowToPwn/hyperdope/issues"
+  },
+  "files": [
+    "bin/",
+    "src/config.js",
+    "src/session.js",
+    "src/server.js",
+    "src/cvss.js",
+    "src/retry.js",
+    "src/context.js",
+    "src/extract.js",
+    "src/phases/",
+    "src/providers/",
+    "agent.example.yaml",
+    "README.md",
+    "LICENSE.md"
+  ],
   "dependencies": {
     "@modelcontextprotocol/sdk": "latest",
     "@anthropic-ai/sdk": "latest",
