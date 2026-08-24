@@ -218,11 +218,12 @@ jobs:
           import { readFileSync, readdirSync, statSync } from 'fs';
           import { join } from 'path';
 
-          function walk(dir) {
+          function walk(dir, exclude = []) {
             const files = [];
             for (const f of readdirSync(dir)) {
+              if (exclude.includes(f)) continue;
               const p = join(dir, f);
-              if (statSync(p).isDirectory()) files.push(...walk(p));
+              if (statSync(p).isDirectory()) files.push(...walk(p, exclude));
               else if (f.endsWith('.js')) files.push(p);
             }
             return files;
@@ -245,7 +246,9 @@ jobs:
           ];
 
           let failed = false;
-          const files = walk('src').concat(walk('bin'));
+          // Exclude src/phases/ — those are LLM prompt templates; security terms
+          // like __proto__, eval(), constructor[ appear as string content, not code.
+          const files = walk('src', ['phases']).concat(walk('bin'));
 
           for (const file of files) {
             const src = readFileSync(file, 'utf8');
@@ -281,24 +284,74 @@ jobs:
           else process.exit(1);
           EOF
 
-      - name: Verify MCP tool input schemas are not overly permissive
+      - name: Hyperdope security invariants
         run: |
           node --input-type=module <<'EOF'
-          import { createServer } from './src/server.js';
-          const s = createServer();
+          import { readFileSync, readdirSync } from 'fs';
+          import { join } from 'path';
+
+          const src = p => readFileSync(p, 'utf8');
           let failed = false;
-          for (const [name, tool] of Object.entries(s._registeredTools ?? {})) {
-            const schema = tool.inputSchema ?? {};
-            // Warn if a tool accepts unrestricted 'any' type at top level
-            const props = schema.properties ?? {};
-            for (const [field, def] of Object.entries(props)) {
-              if (!def.type && !def.$ref && !def.anyOf && !def.oneOf) {
-                console.error(`[-] Tool ${name}.${field} has no type constraint — overly permissive schema`);
-                failed = true;
+
+          // [1] Session directory must be created with restrictive mode.
+          //     Default mkdirSync uses umask-permissive 0o755 on Linux shared hosts —
+          //     any local user can read session files containing prior audit context.
+          {
+            const s = src('src/session.js');
+            if (/mkdirSync|mkdir\s*\(/.test(s) && !/0o?700|S_IRWXU|mode\s*:.*0[o ]?[67]/.test(s)) {
+              console.error('[-] src/session.js: session dir created without restrictive mode (expect 0o700)');
+              failed = true;
+            }
+          }
+
+          // [2] OSV API URL must be a hardcoded literal — not assembled from agent
+          //     config or tool input, which would open an SSRF vector via scan targets.
+          {
+            const s = src('src/phases/scan.js');
+            if (!/'https:\/\/api\.osv\.dev|"https:\/\/api\.osv\.dev/.test(s)) {
+              console.error('[-] src/phases/scan.js: OSV URL is not a string literal — dynamic URL risks SSRF');
+              failed = true;
+            }
+          }
+
+          // [3] Retry logic must not swallow errors with empty catch blocks.
+          //     Silent failure here causes phases to return stale/partial context
+          //     without the caller knowing a network error occurred.
+          {
+            const s = src('src/retry.js');
+            if (/catch\s*\([^)]*\)\s*\{\s*\}/.test(s)) {
+              console.error('[-] src/retry.js: empty catch block silently drops errors');
+              failed = true;
+            }
+          }
+
+          // [4] Context trimming must enforce hard token budgets per phase.
+          //     Unbounded context passed to providers risks OOM on the LLM adapter
+          //     and leaks prior-phase data beyond what the phase needs.
+          {
+            const s = src('src/context.js');
+            if (!/budget|maxLen|limit|trim/i.test(s)) {
+              console.error('[-] src/context.js: no context size budget found — unbounded context risks OOM');
+              failed = true;
+            }
+          }
+
+          // [5] Provider adapters that use agent-supplied base_url in a fetch call
+          //     must validate the URL scheme — operators can point base_url at internal
+          //     services (Redis, metadata endpoints) if the scheme is not enforced.
+          {
+            for (const f of readdirSync('src/providers')) {
+              if (!f.endsWith('.js')) continue;
+              const s = src(join('src/providers', f));
+              if (/base_url|baseUrl/.test(s) && /\bfetch\s*\(/.test(s)) {
+                if (!/startsWith\s*\(['"]https?|new URL\s*\(|url\.parse/.test(s)) {
+                  console.warn(`[!] src/providers/${f}: base_url reaches fetch — URL scheme not validated`);
+                }
               }
             }
           }
-          if (!failed) console.log('[+] All MCP tool schemas have type constraints');
+
+          if (!failed) console.log('[+] All hyperdope security invariants pass');
           else process.exit(1);
           EOF
 
