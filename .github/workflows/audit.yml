@@ -120,10 +120,15 @@ jobs:
   semgrep:
     name: Semgrep SAST
     runs-on: ubuntu-latest
-    container:
-      image: semgrep/semgrep
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Semgrep
+        run: pip install semgrep
 
       - name: Run Semgrep (security-audit + nodejs + owasp-top-ten)
         run: |
@@ -205,6 +210,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: npm
+
+      - run: npm ci --ignore-scripts
 
       - name: Check dangerous sinks with user-influenced data
         run: |
