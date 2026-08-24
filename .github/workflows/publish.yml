@@ -1,0 +1,110 @@
+name: Publish to npm
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+  id-token: write  # for npm provenance attestation
+
+jobs:
+  verify:
+    name: Pre-publish verification
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run full test suite
+        run: node --test test/*.test.js
+
+      - name: Verify all tools register
+        run: |
+          node --input-type=module <<'EOF'
+          import { createServer } from './src/server.js';
+          const s = createServer();
+          const tools = Object.keys(s._registeredTools ?? {});
+          const expected = ['hd_scan','hd_profile','hd_audit','hd_confirm','hd_assess','hd_draft_ghsa','hd_disclose','hd_run'];
+          const missing = expected.filter(t => !tools.includes(t));
+          if (missing.length) { console.error('Missing tools:', missing); process.exit(1); }
+          console.log('✅', tools.length, 'tools registered');
+          EOF
+
+      - name: Verify tag matches package.json version
+        run: |
+          TAG_VERSION="${{ github.ref_name }}"
+          TAG_VERSION="${TAG_VERSION#v}"
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "❌ Tag version ($TAG_VERSION) does not match package.json version ($PKG_VERSION)"
+            exit 1
+          fi
+          echo "✅ Version match: $PKG_VERSION"
+
+      - name: Pack dry-run and verify contents
+        run: |
+          OUTPUT=$(npm pack --dry-run 2>&1)
+          echo "$OUTPUT"
+          FORBIDDEN=(".agents/" ".claude/" "src/photos/" "prompt.md" "notepad.txt" "commit_message.txt" "release.md" "test/")
+          for pattern in "${FORBIDDEN[@]}"; do
+            if echo "$OUTPUT" | grep -q "$pattern"; then
+              echo "❌ Forbidden path in package: $pattern"
+              exit 1
+            fi
+          done
+          echo "✅ Pack contents verified"
+
+  publish:
+    name: Publish
+    needs: verify
+    runs-on: ubuntu-latest
+    environment: npm-publish
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js with npm registry
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Publish to npm (with provenance)
+        run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  release:
+    name: Create GitHub Release
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: hyperdope v${{ steps.version.outputs.version }}
+          body_path: release.md
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}

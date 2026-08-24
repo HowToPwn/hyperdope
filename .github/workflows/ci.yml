@@ -1,0 +1,130 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: ['20', '22', '24']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Syntax check — bin
+        run: node --check bin/hyperdope.js
+
+      - name: Syntax check — src
+        run: |
+          node --check src/server.js
+          node --check src/config.js
+          node --check src/session.js
+          node --check src/cvss.js
+          node --check src/retry.js
+          node --check src/context.js
+          node --check src/extract.js
+          node --check src/providers/index.js
+          node --check src/providers/claude.js
+          node --check src/providers/openai.js
+          node --check src/providers/gemini.js
+          node --check src/providers/ollama.js
+          node --check src/phases/index.js
+          node --check src/phases/profile.js
+          node --check src/phases/audit.js
+          node --check src/phases/confirm.js
+          node --check src/phases/assess.js
+          node --check src/phases/draft_ghsa.js
+          node --check src/phases/disclose.js
+          node --check src/phases/scan.js
+
+  test:
+    name: Tests (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: ['20', '22', '24']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run unit tests
+        run: node --test test/*.test.js
+
+      - name: Verify server starts and registers all tools
+        run: |
+          node --input-type=module <<'EOF'
+          import { createServer } from './src/server.js';
+          const s = createServer();
+          const tools = Object.keys(s._registeredTools ?? {});
+          const expected = ['hd_scan','hd_profile','hd_audit','hd_confirm','hd_assess','hd_draft_ghsa','hd_disclose','hd_run'];
+          const missing = expected.filter(t => !tools.includes(t));
+          if (missing.length) { console.error('Missing tools:', missing); process.exit(1); }
+          console.log('All', tools.length, 'tools registered OK:', tools.join(', '));
+          EOF
+
+  pack-verify:
+    name: Pack verification
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Dry-run pack and check for sensitive files
+        run: |
+          OUTPUT=$(npm pack --dry-run 2>&1)
+          echo "$OUTPUT"
+
+          # Fail if any of these appear in the tarball
+          FORBIDDEN=(".agents/" ".claude/" "src/photos/" "prompt.md" "notepad.txt" "commit_message.txt" "release.md" "test/")
+          for pattern in "${FORBIDDEN[@]}"; do
+            if echo "$OUTPUT" | grep -q "$pattern"; then
+              echo "❌ Forbidden path in package: $pattern"
+              exit 1
+            fi
+          done
+          echo "✅ Pack contents are clean"
+
+      - name: Verify package size under 500kB
+        run: |
+          OUTPUT=$(npm pack --dry-run 2>&1)
+          SIZE_LINE=$(echo "$OUTPUT" | grep "package size")
+          echo "$SIZE_LINE"
+          SIZE_KB=$(echo "$SIZE_LINE" | grep -oP '[\d.]+(?=\s*kB)')
+          if [ -n "$SIZE_KB" ] && awk "BEGIN{exit !($SIZE_KB > 500)}"; then
+            echo "❌ Package size ${SIZE_KB}kB exceeds 500kB limit"
+            exit 1
+          fi
+          echo "✅ Package size OK"

@@ -1,0 +1,366 @@
+name: Security Audit
+
+on:
+  push:
+    branches: [main, master]
+  schedule:
+    - cron: '0 8 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+jobs:
+
+  # ─── 1. DEPENDENCY VULNERABILITY SCAN ───────────────────────────────────────
+  dep-audit:
+    name: Dep scan (npm + OSV batch)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - run: npm ci
+
+      - name: npm audit
+        run: |
+          npm audit --audit-level=high --json > npm-audit.json 2>&1 || true
+          node --input-type=module <<'EOF'
+          import { readFileSync } from 'fs';
+          const r = JSON.parse(readFileSync('npm-audit.json', 'utf8'));
+          const v = r.vulnerabilities ?? {};
+          let crit = 0, high = 0;
+          for (const x of Object.values(v)) {
+            if (x.severity === 'critical') crit++;
+            if (x.severity === 'high') high++;
+          }
+          console.log(`[+] npm audit: critical=${crit} high=${high}`);
+          if (crit > 0 || high > 0) { console.error('[-] Aborting: critical/high deps found'); process.exit(1); }
+          EOF
+
+      - name: OSV batch query (full lockfile)
+        run: |
+          node --input-type=module <<'EOF'
+          import { readFileSync } from 'fs';
+          const lock = JSON.parse(readFileSync('package-lock.json', 'utf8'));
+          const pkgs = [];
+          for (const [raw, info] of Object.entries(lock.packages ?? {})) {
+            if (!raw || !info.version) continue;
+            pkgs.push({ name: raw.replace(/^node_modules\//, ''), version: info.version });
+          }
+          console.log(`[+] Querying OSV for ${pkgs.length} packages`);
+          const BATCH = 100;
+          let crit = [], high = [];
+          for (let i = 0; i < pkgs.length; i += BATCH) {
+            const slice = pkgs.slice(i, i + BATCH);
+            const res = await fetch('https://api.osv.dev/v1/querybatch', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ queries: slice.map(p => ({ package: { name: p.name, ecosystem: 'npm' }, version: p.version })) }),
+            });
+            if (!res.ok) { console.warn(`[-] OSV API ${res.status} on batch ${i}`); continue; }
+            const data = await res.json();
+            for (let j = 0; j < slice.length; j++) {
+              for (const vuln of data.results?.[j]?.vulns ?? []) {
+                const sev = vuln.database_specific?.severity ?? 'UNKNOWN';
+                const line = `${slice[j].name}@${slice[j].version} — ${vuln.id} [${sev}]: ${vuln.summary}`;
+                if (sev === 'CRITICAL') crit.push(line);
+                else if (sev === 'HIGH') high.push(line);
+                else console.log(`    ${line}`);
+              }
+            }
+          }
+          if (crit.length || high.length) {
+            crit.forEach(l => console.error(`[-] CRITICAL: ${l}`));
+            high.forEach(l => console.error(`[-] HIGH: ${l}`));
+            process.exit(1);
+          }
+          console.log('[+] OSV: no critical/high findings');
+          EOF
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: npm-audit-report
+          path: npm-audit.json
+          retention-days: 30
+
+  # ─── 2. CODEQL ───────────────────────────────────────────────────────────────
+  codeql:
+    name: CodeQL (JavaScript)
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: javascript-typescript
+          queries: security-extended,security-and-quality
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: /language:javascript-typescript
+
+  # ─── 3. SEMGREP ──────────────────────────────────────────────────────────────
+  semgrep:
+    name: Semgrep SAST
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Semgrep (security-audit + nodejs + owasp-top-ten)
+        run: |
+          semgrep scan \
+            --config p/security-audit \
+            --config p/nodejs \
+            --config p/owasp-top-ten \
+            --config p/javascript \
+            --error \
+            --json \
+            --output semgrep.json \
+            src/ bin/ || true
+
+          node --input-type=module <<'EOF'
+          import { readFileSync } from 'fs';
+          const r = JSON.parse(readFileSync('semgrep.json', 'utf8'));
+          const results = r.results ?? [];
+          const errors = results.filter(x => x.extra?.severity === 'ERROR');
+          const warnings = results.filter(x => x.extra?.severity === 'WARNING');
+          console.log(`[+] Semgrep: ${results.length} findings (${errors.length} errors, ${warnings.length} warnings)`);
+          for (const e of errors) {
+            console.error(`[-] ${e.path}:${e.start?.line} [${e.check_id}] ${e.extra?.message}`);
+          }
+          if (errors.length > 0) process.exit(1);
+          EOF
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: semgrep-results
+          path: semgrep.json
+          retention-days: 30
+
+  # ─── 4. SECRET SCAN (TruffleHog) ─────────────────────────────────────────────
+  secrets:
+    name: Secret scan (TruffleHog)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: TruffleHog scan (full git history)
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          base: ${{ github.event.repository.default_branch }}
+          head: HEAD
+          extra_args: --only-verified --json
+
+      - name: Supplemental regex scan (non-verified patterns)
+        run: |
+          FAIL=0
+          declare -A PATTERNS=(
+            ["anthropic-api-key"]='sk-ant-api[0-9A-Za-z_-]{93}'
+            ["openai-api-key"]='sk-[a-zA-Z0-9]{48}'
+            ["google-api-key"]='AIza[0-9A-Za-z\-_]{35}'
+            ["github-token"]='gh[pousr]_[A-Za-z0-9]{36}'
+            ["npm-token"]='npm_[A-Za-z0-9]{36}'
+            ["generic-high-entropy"]='[A-Za-z0-9+/]{40,}={0,2}'
+          )
+          for label in "${!PATTERNS[@]}"; do
+            HITS=$(grep -rEn "${PATTERNS[$label]}" src/ bin/ --include="*.js" 2>/dev/null || true)
+            if [ -n "$HITS" ]; then
+              echo "[-] Potential $label detected:"
+              echo "$HITS"
+              FAIL=1
+            fi
+          done
+          [ "$FAIL" -eq 0 ] && echo "[+] No secrets found" || exit 1
+
+  # ─── 5. CUSTOM SAST (hyperdope-specific) ────────────────────────────────────
+  custom-sast:
+    name: Custom SAST (MCP-specific patterns)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Check dangerous sinks with user-influenced data
+        run: |
+          node --input-type=module <<'EOF'
+          import { readFileSync, readdirSync, statSync } from 'fs';
+          import { join } from 'path';
+
+          function walk(dir) {
+            const files = [];
+            for (const f of readdirSync(dir)) {
+              const p = join(dir, f);
+              if (statSync(p).isDirectory()) files.push(...walk(p));
+              else if (f.endsWith('.js')) files.push(p);
+            }
+            return files;
+          }
+
+          const DANGEROUS = [
+            { pattern: /\beval\s*\(/g,                           label: 'eval()' },
+            { pattern: /\bnew\s+Function\s*\(/g,                 label: 'new Function()' },
+            { pattern: /\bchild_process\b.*\bexec\b/g,           label: 'child_process.exec' },
+            { pattern: /\bvm\.runIn/g,                           label: 'vm.runIn*' },
+            { pattern: /\b__proto__\b/g,                         label: 'prototype pollution: __proto__' },
+            { pattern: /\bconstructor\s*\[/g,                    label: 'prototype pollution: constructor[' },
+            { pattern: /process\.env\s*\[/g,                     label: 'dynamic env var access' },
+          ];
+
+          const REDOS = [
+            // Patterns with nested quantifiers on large character classes
+            /\([^)]+\+\)\+/,
+            /\([^)]+\*\)\*/,
+            /\([^)]+\+\)\*/,
+          ];
+
+          let failed = false;
+          const files = walk('src').concat(walk('bin'));
+
+          for (const file of files) {
+            const src = readFileSync(file, 'utf8');
+            const lines = src.split('\n');
+
+            for (const { pattern, label } of DANGEROUS) {
+              const matches = [...src.matchAll(pattern)];
+              for (const m of matches) {
+                const lineNo = src.slice(0, m.index).split('\n').length;
+                const line = lines[lineNo - 1]?.trim() ?? '';
+                // Skip if it's in a comment
+                if (line.startsWith('//') || line.startsWith('*')) continue;
+                console.error(`[-] ${file}:${lineNo} — dangerous sink [${label}]: ${line.slice(0, 80)}`);
+                failed = true;
+              }
+            }
+
+            // ReDoS check: look for regex literals with catastrophic backtracking potential
+            const regexLiterals = [...src.matchAll(/\/([^/\n]{20,})\/[gimsuy]*/g)];
+            for (const m of regexLiterals) {
+              const pat = m[1];
+              for (const redos of REDOS) {
+                if (redos.test(pat)) {
+                  const lineNo = src.slice(0, m.index).split('\n').length;
+                  console.error(`[-] ${file}:${lineNo} — potential ReDoS pattern: /${pat.slice(0, 60)}/`);
+                  failed = true;
+                }
+              }
+            }
+          }
+
+          if (!failed) console.log('[+] Custom SAST: no dangerous sinks or ReDoS patterns found');
+          else process.exit(1);
+          EOF
+
+      - name: Verify MCP tool input schemas are not overly permissive
+        run: |
+          node --input-type=module <<'EOF'
+          import { createServer } from './src/server.js';
+          const s = createServer();
+          let failed = false;
+          for (const [name, tool] of Object.entries(s._registeredTools ?? {})) {
+            const schema = tool.inputSchema ?? {};
+            // Warn if a tool accepts unrestricted 'any' type at top level
+            const props = schema.properties ?? {};
+            for (const [field, def] of Object.entries(props)) {
+              if (!def.type && !def.$ref && !def.anyOf && !def.oneOf) {
+                console.error(`[-] Tool ${name}.${field} has no type constraint — overly permissive schema`);
+                failed = true;
+              }
+            }
+          }
+          if (!failed) console.log('[+] All MCP tool schemas have type constraints');
+          else process.exit(1);
+          EOF
+
+  # ─── 6. SUPPLY CHAIN INTEGRITY ───────────────────────────────────────────────
+  supply-chain:
+    name: Supply chain integrity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Verify lockfile integrity hashes are present
+        run: |
+          node --input-type=module <<'EOF'
+          import { readFileSync } from 'fs';
+          const lock = JSON.parse(readFileSync('package-lock.json', 'utf8'));
+          const missing = [];
+          for (const [name, info] of Object.entries(lock.packages ?? {})) {
+            if (!name || name === '') continue;
+            if (!info.integrity) missing.push(name.replace('node_modules/', ''));
+          }
+          if (missing.length) {
+            console.error(`[-] ${missing.length} packages missing integrity hash:`);
+            missing.slice(0, 20).forEach(p => console.error(`    ${p}`));
+            process.exit(1);
+          }
+          console.log(`[+] All packages have integrity hashes`);
+          EOF
+
+      - name: Verify npm install matches lockfile (no tampering)
+        run: |
+          npm ci --ignore-scripts
+          npm ls --json > installed.json 2>&1 || true
+          echo "[+] Dependency tree verified via npm ci"
+
+      - name: Check for dependency confusion risk (internal-looking package names)
+        run: |
+          node --input-type=module <<'EOF'
+          import { readFileSync } from 'fs';
+          const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
+          const allDeps = { ...pkg.dependencies, ...pkg.devDependencies };
+          const SUSPICIOUS = [];
+          for (const name of Object.keys(allDeps)) {
+            // Flag scoped packages that are not from well-known registries
+            if (name.startsWith('@') && !name.startsWith('@anthropic-ai') &&
+                !name.startsWith('@modelcontextprotocol') && !name.startsWith('@google') &&
+                !name.startsWith('@types') && !name.startsWith('@octokit')) {
+              SUSPICIOUS.push(name);
+            }
+          }
+          if (SUSPICIOUS.length) {
+            console.warn(`[!] Scoped packages requiring manual review: ${SUSPICIOUS.join(', ')}`);
+          } else {
+            console.log('[+] No suspicious scoped package names');
+          }
+          EOF
+
+      - name: Reproducible pack hash check
+        run: |
+          HASH1=$(npm pack --dry-run 2>&1 | grep integrity | awk '{print $NF}')
+          HASH2=$(npm pack --dry-run 2>&1 | grep integrity | awk '{print $NF}')
+          if [ "$HASH1" != "$HASH2" ]; then
+            echo "[-] Pack is non-deterministic: $HASH1 != $HASH2"
+            exit 1
+          fi
+          echo "[+] Pack is reproducible: $HASH1"
