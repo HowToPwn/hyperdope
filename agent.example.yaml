@@ -1,0 +1,78 @@
+# agent.example.yaml — copy this to agent.yaml and fill in your values
+# Hyperdope reads this file to configure the LLM provider for the research pipeline.
+
+# ─── Provider ────────────────────────────────────────────────────────────────
+# Supported: claude, openai, gemini, ollama, glm, kimi, qwen
+# Any openai-compatible endpoint is supported via base_url override.
+provider: claude
+
+# Model identifier as the provider expects it
+model: claude-sonnet-4-6
+
+# API key — reference an environment variable with ${VAR_NAME}
+# The variable is resolved at runtime. Never hardcode keys here.
+api_key: ${CLAUDE_API_KEY}
+
+# Optional: override the API base URL (for openai-compatible providers)
+# Leave as ~ (null) for the default endpoint.
+base_url: ~
+
+# ─── Generation parameters ───────────────────────────────────────────────────
+max_tokens: 8192
+temperature: 0.2
+
+# ─── Phase prompt overrides (all optional) ───────────────────────────────────
+# Hyperdope has built-in production prompts for every phase.
+# Override any phase's system prompt or user prefix here.
+# Set a field to ~ to use the built-in default.
+phases:
+  profile:
+    # Replace the built-in system prompt for Phase 1
+    system: ~
+    # Text prepended to the user message (before the target descriptor)
+    user_prefix: ~
+
+  audit:
+    system: ~
+    user_prefix: ~
+
+  confirm:
+    system: ~
+    user_prefix: ~
+
+  assess:
+    system: ~
+    user_prefix: ~
+
+  draft_ghsa:
+    system: ~
+    user_prefix: ~
+
+  disclose:
+    system: ~
+    user_prefix: ~
+
+# ─── Provider examples ───────────────────────────────────────────────────────
+
+# OpenAI (GPT-4o):
+# provider: openai
+# model: gpt-4o
+# api_key: ${OPENAI_API_KEY}
+# base_url: ~
+
+# Google Gemini:
+# provider: gemini
+# model: gemini-1.5-pro
+# api_key: ${GEMINI_API_KEY}
+
+# Ollama (local):
+# provider: ollama
+# model: llama3.1:70b
+# api_key: ~
+# base_url: http://localhost:11434
+
+# GLM / Kimi / Qwen (openai-compatible):
+# provider: glm
+# model: glm-4-plus
+# api_key: ${GLM_API_KEY}
+# base_url: https://open.bigmodel.cn/api/paas/v4

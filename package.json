@@ -1,0 +1,56 @@
+{
+  "name": "hyperdope",
+  "version": "0.1.0",
+  "description": "MCP server for adversarial security research — 6-phase pipeline from profile to disclosure",
+  "type": "module",
+  "bin": {
+    "hyperdope": "bin/hyperdope.js"
+  },
+  "scripts": {
+    "start": "node bin/hyperdope.js"
+  },
+  "keywords": [
+    "mcp",
+    "security",
+    "vulnerability",
+    "research",
+    "pentest",
+    "cvss",
+    "ghsa",
+    "disclosure",
+    "claude",
+    "llm"
+  ],
+  "author": "HowToPwn",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HowToPwn/hyperdope.git"
+  },
+  "homepage": "https://github.com/HowToPwn/hyperdope#readme",
+  "bugs": {
+    "url": "https://github.com/HowToPwn/hyperdope/issues"
+  },
+  "files": [
+    "bin/",
+    "src/config.js",
+    "src/session.js",
+    "src/server.js",
+    "src/phases/",
+    "src/providers/",
+    "agent.example.yaml",
+    "README.md",
+    "LICENSE.md"
+  ],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "latest",
+    "@anthropic-ai/sdk": "latest",
+    "openai": "latest",
+    "@google/generative-ai": "latest",
+    "js-yaml": "latest",
+    "zod": "latest"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
