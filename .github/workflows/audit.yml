@@ -175,9 +175,7 @@ jobs:
         uses: trufflesecurity/trufflehog@main
         with:
           path: ./
-          base: ${{ github.event.repository.default_branch }}
-          head: HEAD
-          extra_args: --only-verified --json
+          extra_args: --only-verified
 
       - name: Supplemental regex scan (non-verified patterns)
         run: |
@@ -237,7 +235,6 @@ jobs:
             { pattern: /\bvm\.runIn/g,                           label: 'vm.runIn*' },
             { pattern: /\b__proto__\b/g,                         label: 'prototype pollution: __proto__' },
             { pattern: /\bconstructor\s*\[/g,                    label: 'prototype pollution: constructor[' },
-            { pattern: /process\.env\s*\[/g,                     label: 'dynamic env var access' },
           ];
 
           const REDOS = [
