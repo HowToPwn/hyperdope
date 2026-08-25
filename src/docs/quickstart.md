@@ -1,48 +1,48 @@
-# Hyperdope — Quickstart
+# Hyperdope - Quickstart
 
-Từ zero đến finding đầu tiên trong 5 phút.
+From zero to your first finding in 5 minutes.
 
 ---
 
-## Yêu cầu
+## Prerequisites
 
 | | |
 |---|---|
-| **Node.js** | ≥ 20 — kiểm tra: `node --version` |
-| **API key** | Anthropic, OpenAI, Google, hoặc Ollama local |
-| **MCP client** | Claude Desktop, Cursor, hoặc bất kỳ MCP client nào |
+| **Node.js** | ≥ 20 - verify with: `node --version` |
+| **API key** | Anthropic, OpenAI, Google, or local Ollama |
+| **MCP client** | Claude Desktop, Cursor, or any MCP client |
 
 ---
 
-## Bước 1 — Cài đặt
+## Step 1 - Installation
 
 ```bash
-# Cài global (dùng được npx hd-ci / hd-run ở bất kỳ đâu)
+# Install globally (enables npx hd-ci / hd-run anywhere)
 npm install -g hyperdope
 
-# Hoặc chạy thẳng không cài:
+# Or run directly without installation:
 npx hyperdope
 ```
 
 ---
 
-## Bước 2 — Tạo agent config
+## Step 2 - Create Agent Config
 
 ```bash
-# Copy từ template
+# Copy from template
 cp agent.example.yaml agent.yaml
 ```
 
-Sửa `agent.yaml` — chọn provider và điền model:
+Edit `agent.yaml` - choose provider and specify model:
 
 ```yaml
-# agent.yaml — Claude (khuyến nghị)
+# agent.yaml - Claude (recommended)
 provider: claude
 model:    claude-opus-4-5
-api_key:  ${ANTHROPIC_API_KEY}    # đọc từ env, không hardcode
+api_key:  ${ANTHROPIC_API_KEY}    # loaded from env, do not hardcode
 ```
 
-Đặt env var:
+Set environment variable:
 
 ```bash
 # Linux / macOS
@@ -55,26 +55,26 @@ $env:ANTHROPIC_API_KEY = "sk-ant-api03-..."
 set ANTHROPIC_API_KEY=sk-ant-api03-...
 ```
 
-> **Bảo mật:** Thêm `agent.yaml` vào `.gitignore` — file này có thể chứa API key.
-> `hd_scan` sẽ tự flag nếu bạn quên hardcode key vào YAML.
+> **Security:** Add `agent.yaml` to `.gitignore` - this file may contain API keys.
+> `hd_scan` will automatically flag if you accidentally hardcode keys into YAML.
 
-Xem đầy đủ các provider và option tại [concepts/agent-yaml.md](concepts/agent-yaml.md).
+See all providers and options at [concepts/agent-yaml.md](concepts/agent-yaml.md).
 
 ---
 
-## Bước 3 — Kết nối MCP client
+## Step 3 - Connect MCP Client
 
 ### Claude Desktop
 
-Tìm file config theo OS:
+Locate config file by OS:
 
-| OS | Đường dẫn |
+| OS | Path |
 |---|---|
 | **macOS** | `~/Library/Application Support/Claude/claude_desktop_config.json` |
 | **Windows** | `%APPDATA%\Claude\claude_desktop_config.json` |
 | **Linux** | `~/.config/Claude/claude_desktop_config.json` |
 
-Thêm vào file (tạo mới nếu chưa có):
+Add to file (create if it doesn't exist):
 
 ```json
 {
@@ -90,7 +90,7 @@ Thêm vào file (tạo mới nếu chưa có):
 }
 ```
 
-**Hoặc** nếu đã cài global:
+**Or** if installed globally:
 
 ```json
 {
@@ -102,11 +102,11 @@ Thêm vào file (tạo mới nếu chưa có):
 }
 ```
 
-Sau đó **khởi động lại Claude Desktop**. Vào Settings → Developer → MCP Servers, thấy `hyperdope` ở trạng thái Connected là OK.
+Then **restart Claude Desktop**. Go to Settings → Developer → MCP Servers, verify `hyperdope` shows Connected status.
 
 ### Cursor / VS Code
 
-Thêm vào `.cursor/mcp.json` hoặc `.vscode/mcp.json`:
+Add to `.cursor/mcp.json` or `.vscode/mcp.json`:
 
 ```json
 {
@@ -125,17 +125,17 @@ Thêm vào `.cursor/mcp.json` hoặc `.vscode/mcp.json`:
 
 ---
 
-## Bước 4 — Scan đầu tiên (không cần LLM)
+## Step 4 - First Scan (No LLM Required)
 
-`hd_scan` gọi thẳng OSV.dev — không cần API key, không tốn tiền.
+`hd_scan` queries OSV.dev directly - no API key needed, zero cost.
 
-**Cách 1 — Dùng CLI `hd-ci` (nhanh nhất):**
+**Option 1 - Use CLI `hd-ci` (fastest):**
 
 ```bash
 npx hd-ci --target /path/to/your/project
 ```
 
-Output mẫu:
+Sample output:
 
 ```
 ╔════════════════════════════════════════════════════════╗
@@ -148,9 +148,9 @@ Output mẫu:
   ✓  Scan complete: 312 pkgs  ·  2 CVEs  ·  0 secrets
 
   [HIGH    ] 2 findings
-    · lodash@4.17.20 — Prototype pollution
+    · lodash@4.17.20 - Prototype pollution
         npm:lodash@4.17.20
-    · semver@5.7.1 — ReDoS
+    · semver@5.7.1 - ReDoS
         npm:semver@5.7.1
 
   ╔════════════════════════════════════════════════╗
@@ -158,30 +158,30 @@ Output mẫu:
   ╚════════════════════════════════════════════════╝
 ```
 
-**Cách 2 — Dùng MCP tool `hd_scan`** (trong Claude Desktop / Cursor):
+**Option 2 - Use MCP tool `hd_scan`** (inside Claude Desktop / Cursor):
 
 ```
-Gọi tool hd_scan với target = "/path/to/your/project"
+Call tool hd_scan with target = "/path/to/your/project"
 ```
 
-Output JSON trả về gồm:
-- `findings[]` — CVEs, secrets, hooks
-- `meta.packages_scanned` — số package đã scan
-- `sbom` — danh sách toàn bộ dependency
+Returned JSON output includes:
+- `findings[]` - CVEs, secrets, hooks
+- `meta.packages_scanned` - number of scanned packages
+- `sbom` - full dependency list
 
 ---
 
-## Bước 5 — Chạy full audit pipeline
+## Step 5 - Run Full Audit Pipeline
 
-### Cách 1 — Standalone CLI `hd-run` (khuyến nghị cho bắt đầu)
+### Option 1 - Standalone CLI `hd-run` (recommended for getting started)
 
-Không cần MCP client, chạy thẳng từ terminal:
+No MCP client required, run directly from terminal:
 
 ```bash
 npx hd-run --agent agent.yaml --target https://github.com/org/repo
 ```
 
-Output realtime:
+Realtime output:
 
 ```
 ╔════════════════════════════════════════════════════════╗
@@ -205,33 +205,33 @@ Output realtime:
   ╚════════════════════════════════════════════════╝
 ```
 
-Chạy một phase đơn lẻ:
+Run a single phase:
 
 ```bash
-# Chỉ chạy scan
+# Run scan only
 npx hd-run --agent agent.yaml --target ./ --phase scan
 
-# Chỉ chạy audit
+# Run audit only
 npx hd-run --agent agent.yaml --target https://github.com/org/repo --phase audit
 ```
 
-### Cách 2 — Dùng MCP tool `hd_run` (trong Claude Desktop / Cursor)
+### Option 2 - Use MCP tool `hd_run` (inside Claude Desktop / Cursor)
 
 ```
-Gọi tool hd_run với:
+Call tool hd_run with:
   agent  = "agent.yaml"
   target = "https://github.com/org/repo"
 ```
 
-Pipeline sẽ chạy tuần tự: `profile → audit → confirm → assess → draft_ghsa → disclose`
+The pipeline executes sequentially: `profile → audit → confirm → assess → draft_ghsa → disclose`
 
-Session file được lưu tự động.
+Session file is saved automatically.
 
 ---
 
-## Bước 6 — Resume khi bị gián đoạn
+## Step 6 - Resume Interrupted Pipeline
 
-Nếu pipeline dừng giữa chừng (lỗi mạng, hết token, v.v.), resume từ phase bị dừng:
+If the pipeline stops midway (network error, out of tokens, etc.), resume from the interrupted phase:
 
 ```bash
 # CLI
@@ -251,11 +251,11 @@ npx hd-run --agent agent.yaml \
 }
 ```
 
-Hyperdope đọc context của các phase đã xong từ session file, bỏ qua chúng và tiếp tục từ `confirm`.
+Hyperdope reads completed phase contexts from the session file, skips them, and continues from `confirm`.
 
 ---
 
-## Bước 7 — Verify patch sau khi vendor fix
+## Step 7 - Verify Patch After Vendor Fix
 
 ```bash
 npx hd-run --agent agent.yaml \
@@ -263,71 +263,71 @@ npx hd-run --agent agent.yaml \
   --phase verify
 ```
 
-Hoặc MCP tool `hd_verify` với context từ audit + confirm + assess.
+Or via MCP tool `hd_verify` with context from audit + confirm + assess.
 
-Kết quả trả về verdict cho từng finding: `PATCHED` / `PARTIAL_FIX` / `STILL_VULNERABLE` / `CANNOT_VERIFY`.
+Returns a verdict for each finding: `PATCHED` / `PARTIAL_FIX` / `STILL_VULNERABLE` / `CANNOT_VERIFY`.
 
 ---
 
-## Tích hợp CI/CD
+## CI/CD Integration
 
 ```bash
-# Fail build nếu có CVE mức High trở lên
+# Fail build if there are CVEs of High severity or above
 npx hd-ci --target ./ --sarif-out results.sarif.json
 # exit 0 = PASS, exit 1 = FAIL
 ```
 
-Xem hướng dẫn đầy đủ tại [guides/ci-integration.md](guides/ci-integration.md).
+See full guide at [guides/ci-integration.md](guides/ci-integration.md).
 
 ---
 
 ## Troubleshooting
 
-### "Cannot find module" hoặc "command not found"
+### "Cannot find module" or "command not found"
 
 ```bash
-# Kiểm tra Node.js version (phải ≥ 20)
+# Check Node.js version (must be ≥ 20)
 node --version
 
-# Cài lại
+# Reinstall
 npm install -g hyperdope@latest
 ```
 
-### "base_url must use HTTPS" hoặc "blocked metadata host"
+### "base_url must use HTTPS" or "blocked metadata host"
 
-`base_url` trong `agent.yaml` trỏ đến địa chỉ nội bộ hoặc dùng HTTP. Xem [concepts/agent-yaml.md](concepts/agent-yaml.md#security) để biết các địa chỉ bị chặn.
+`base_url` in `agent.yaml` points to an internal address or uses HTTP. See [concepts/agent-yaml.md](concepts/agent-yaml.md#security) for blocked address rules.
 
 ### "Agent config path must be within the working directory"
 
 ```bash
-# Dùng env var thay vì path tương đối
+# Use env var instead of relative path
 export HYPERDOPE_AGENT=/absolute/path/to/agent.yaml
 ```
 
-Hoặc chạy từ đúng thư mục chứa `agent.yaml`.
+Or run from the exact directory containing `agent.yaml`.
 
-### Tool không xuất hiện trong Claude Desktop
+### Tool does not appear in Claude Desktop
 
-1. Kiểm tra JSON config hợp lệ: `cat ~/Library/Application\ Support/Claude/claude_desktop_config.json | python3 -m json.tool`
-2. Kiểm tra `npx hyperdope` chạy được trong terminal cùng user với Claude Desktop
-3. Xem log MCP: Claude Desktop → Settings → Developer → Logs
+1. Verify valid JSON config: `cat ~/Library/Application\ Support/Claude/claude_desktop_config.json | python3 -m json.tool`
+2. Verify `npx hyperdope` runs in terminal under the same user as Claude Desktop
+3. Check MCP logs: Claude Desktop → Settings → Developer → Logs
 
-### OSV API trả về lỗi
+### OSV API returns an error
 
 ```bash
-# Test trực tiếp
+# Test directly
 curl -s https://api.osv.dev/v1/query -d '{"package":{"name":"lodash","ecosystem":"npm"},"version":"4.17.20"}' | head -c 200
 ```
 
-Nếu OSV down, `hd_scan` vẫn trả về secret detection và hook analysis; CVE list sẽ có `osv_error` trong `meta`.
+If OSV is down, `hd_scan` still returns secret detection and hook analysis; CVE list will include `osv_error` in `meta`.
 
 ---
 
-## Bước tiếp theo
+## Next Steps
 
-| Tài liệu | Nội dung |
+| Document | Content |
 |---|---|
-| [concepts/pipeline.md](concepts/pipeline.md) | Hiểu 6 phase, context flow, injection mitigation |
-| [concepts/agent-yaml.md](concepts/agent-yaml.md) | Toàn bộ config option, 4 provider |
-| [guides/audit-nodejs.md](guides/audit-nodejs.md) | Audit Node.js project từ đầu đến cuối |
-| [guides/ci-integration.md](guides/ci-integration.md) | GitHub Actions workflow, SARIF, weekly scan |
+| [concepts/pipeline.md](concepts/pipeline.md) | Understand the 6 phases, context flow, injection mitigation |
+| [concepts/agent-yaml.md](concepts/agent-yaml.md) | Full config options, 4 supported providers |
+| [guides/audit-nodejs.md](guides/audit-nodejs.md) | End-to-end Node.js project audit guide |
+| [guides/ci-integration.md](guides/ci-integration.md) | GitHub Actions workflow, SARIF export, weekly scanning |

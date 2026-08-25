@@ -1,41 +1,41 @@
-# Audit Node.js Project — End to End
+# Audit Node.js Project - End to End
 
-Hướng dẫn đầy đủ: từ dependency scan đến gói disclosure cho một Node.js project.
+Complete guide: from dependency scanning to disclosure package generation for a Node.js project.
 
 ---
 
 ## Setup
 
 ```bash
-# 1. Cài Hyperdope
+# 1. Install Hyperdope
 npm install -g hyperdope
 
-# 2. Tạo agent config
+# 2. Create agent config
 cp agent.example.yaml agent.yaml
 
 # 3. Set API key
 export ANTHROPIC_API_KEY=sk-ant-api03-...
 
-# 4. Thêm agent.yaml vào gitignore
+# 4. Add agent.yaml to gitignore
 echo "agent.yaml" >> .gitignore
 ```
 
 ---
 
-## Cách nhanh nhất — `hd-run` một lệnh
+## Fastest Method - Single-Command `hd-run`
 
 ```bash
-# Chạy toàn bộ 6 phase, kết quả xuất realtime
+# Run all 6 phases with realtime streaming output
 npx hd-run --agent agent.yaml \
   --target https://github.com/your-org/your-repo
 
-# Lưu kết quả ra file JSON
+# Save full results to a JSON file
 npx hd-run --agent agent.yaml \
   --target https://github.com/your-org/your-repo \
   --out result.json
 ```
 
-Output realtime:
+Realtime output:
 
 ```
 ╔════════════════════════════════════════════════════════╗
@@ -66,13 +66,13 @@ Output realtime:
 
 ---
 
-## Cách kiểm soát từng phase — step by step
+## Controlled Step-by-Step Execution
 
-### Scan dependencies trước (không tốn API)
+### Scan Dependencies First (Zero API Cost)
 
 ```bash
-npx hd-ci --target ./     # Terminal output đẹp
-# hoặc
+npx hd-ci --target ./     # Formatted terminal UI
+# or
 npx hd-run --agent agent.yaml --target ./ --phase scan
 ```
 
@@ -82,62 +82,62 @@ Output:
   ✓  Scan complete: 487 pkgs  ·  3 CVEs  ·  0 secrets
 
   [HIGH    ] 2 findings
-    · lodash@4.17.20 — Prototype pollution
+    · lodash@4.17.20 - Prototype pollution
         npm:lodash@4.17.20
-    · semver@5.7.1 — ReDoS vulnerability
+    · semver@5.7.1 - ReDoS vulnerability
         npm:semver@5.7.1
   [MEDIUM  ] 1 finding
-    · express@4.17.1 — Open redirect
+    · express@4.17.1 - Open redirect
         npm:express@4.17.1
 ```
 
-**Nếu thấy `secrets_found > 0`:** Rotate ngay credential đó và xóa khỏi git history trước khi tiếp tục.
+**If `secrets_found > 0`:** Rotate that credential immediately and purge it from git history before proceeding.
 
-**Nếu thấy `hooks_found > 0`:** Kiểm tra field `hook_cmd`. Pattern `curl | bash` hoặc `wget` trong `postinstall` = nguy cơ supply chain.
+**If `hooks_found > 0`:** Inspect the `hook_cmd` field. Patterns such as `curl | bash` or `wget` in `postinstall` indicate potential supply chain risks.
 
 ---
 
-### Phase-by-phase trong MCP client
+### Phase-by-Phase in MCP Client
 
-Nếu muốn xem kết quả từng bước trong Claude Desktop hoặc Cursor:
+To inspect findings after each step in Claude Desktop or Cursor:
 
-**Bước 1 — Map attack surface:**
+**Step 1 - Map Attack Surface:**
 
 ```
-Gọi hd_profile với:
+Call hd_profile with:
   agent  = "agent.yaml"
   target = "https://github.com/your-org/your-repo"
 ```
 
-Output trả về object JSON. **Lưu lại toàn bộ field `raw`** — đây là string sẽ truyền vào `context` bước sau.
+Output returns a JSON object. **Save the full `raw` field** - this string is passed into `context` in the next step.
 
-**Bước 2 — Hunt vulnerabilities:**
+**Step 2 - Hunt Vulnerabilities:**
 
 ```
-Gọi hd_audit với:
+Call hd_audit with:
   agent   = "agent.yaml"
   target  = "https://github.com/your-org/your-repo"
   context = {
-    "profile": "<paste toàn bộ raw string từ hd_profile ở đây>"
+    "profile": "<paste entire raw string from hd_profile here>"
   }
 ```
 
-> **Cách truyền context đúng:**
-> - `context` là object JSON với key = tên phase, value = **chuỗi raw** (không parse)
-> - Nếu dùng trong Claude Desktop: Claude sẽ tự trích xuất và truyền context — chỉ cần nói "dùng output từ bước trước"
-> - Nếu tự gọi qua code/API: copy field `result.context` từ output phase trước và truyền nguyên vào phase sau
+> **Context Passing Guidelines:**
+> - `context` is a JSON object with key = phase name, value = **raw string** (unparsed)
+> - In Claude Desktop: Claude will automatically extract and forward context - simply instruct "use the output from the previous step"
+> - When invoking via custom code/API: copy `result.context` from the prior phase output and pass it intact into the next phase
 
-**Bước 3 — Generate PoC:**
+**Step 3 - Generate PoCs:**
 
 ```
-Gọi hd_confirm với context từ cả profile + audit:
+Call hd_confirm with context from both profile + audit:
   context = {
     "profile": "...",
-    "audit":   "<raw string từ hd_audit>"
+    "audit":   "<raw string from hd_audit>"
   }
 ```
 
-PoC mẫu trả về:
+Sample returned PoC:
 
 ```
 ## PoC 1: Path Traversal via /api/download
@@ -151,7 +151,7 @@ Steps:
    curl -s "https://target.com/api/download?file=../../etc/passwd" \
      -H "Authorization: Bearer <any_valid_token>"
 3. Expected: 200 OK with content of /etc/passwd
-4. Actual: Returns file contents — CONFIRMED
+4. Actual: Returns file contents - CONFIRMED
 
 Payload alternatives:
   - ../../etc/shadow
@@ -159,17 +159,17 @@ Payload alternatives:
   - ../../../../proc/self/environ  (leaks env vars including secrets)
 ```
 
-**Bước 4 — Tính CVSS:**
+**Step 4 - Calculate CVSS:**
 
 ```
-Gọi hd_assess với:
+Call hd_assess with:
   context = {
     "audit":   "...",
-    "confirm": "<raw từ hd_confirm>"
+    "confirm": "<raw from hd_confirm>"
   }
 ```
 
-Output mẫu:
+Sample output:
 
 ```json
 {
@@ -179,41 +179,41 @@ Output mẫu:
   "cvss_score":       6.5,
   "severity":         "high",
   "reasoning": {
-    "AV": "Network — endpoint accessible over internet",
-    "AC": "Low — no special preconditions",
-    "PR": "Low — requires valid auth token (guest account works)",
+    "AV": "Network - endpoint accessible over internet",
+    "AC": "Low - no special preconditions",
+    "PR": "Low - requires valid auth token (guest account works)",
     "UI": "None",
     "S":  "Unchanged",
-    "C":  "High — arbitrary file read on server",
-    "I":  "None — read-only exploit",
+    "C":  "High - arbitrary file read on server",
+    "I":  "None - read-only exploit",
     "A":  "None"
   }
 }
 ```
 
-**Bước 5–6 — Draft advisory + Disclosure:**
+**Steps 5–6 - Draft Advisory + Disclosure Package:**
 
 ```
-Gọi hd_draft_ghsa → hd_disclose với context tích lũy từ các bước trước
+Call hd_draft_ghsa → hd_disclose with accumulated context from earlier steps
 ```
 
 ---
 
-## Tips đặc thù cho Node.js
+## Node.js-Specific Tips
 
-### Target là GitHub URL thay vì local path
+### Target as GitHub URL vs Local Path
 
 ```yaml
-# ✅ Cho LLM phase — model fetch source tree
+# ✅ For LLM phases - model fetches remote repository tree
 target: https://github.com/your-org/your-repo
 
-# ✅ Cho hd_scan — cần local path có lockfile
+# ✅ For hd_scan - requires local directory with lockfiles
 target: /path/to/local/repo
 ```
 
-### TypeScript project
+### TypeScript Projects
 
-Override `user_prefix` trong `agent.yaml` để model chú ý `.ts` files:
+Override `user_prefix` in `agent.yaml` to focus attention on `.ts` files:
 
 ```yaml
 phases:
@@ -223,12 +223,11 @@ phases:
       Check for type assertions (as any, as unknown) that bypass type safety.
       Common TypeScript-specific risks: unsafe type casting, prototype pollution
       in generic utility functions, deserialization without type guards.
-
 ```
 
-### Prototype pollution — thường bị bỏ sót
+### Prototype Pollution - Commonly Overlooked
 
-Node.js-specific và rất phổ biến. Audit phase sẽ check nhưng có thể nhắc thêm:
+Node.js-specific and highly prevalent. While the audit phase checks for this automatically, you can emphasize it:
 
 ```yaml
 phases:
@@ -239,23 +238,22 @@ phases:
       - Object.assign() calls where destination is not a literal {}
       - for..in loops without hasOwnProperty() check
       - Libraries: lodash <4.17.21, minimist <1.2.6, qs <6.9.7
-
 ```
 
-### Monorepo
+### Monorepo Architectures
 
 ```bash
-# Scan từng package riêng
+# Scan each package independently
 npx hd-ci --target ./packages/api      --sarif-out api.sarif.json
 npx hd-ci --target ./packages/frontend --sarif-out frontend.sarif.json
 
-# Audit phần public-facing
+# Audit public-facing API sub-tree
 npx hd-run --agent agent.yaml --target https://github.com/org/repo/tree/main/packages/api
 ```
 
-### Express middleware order bug
+### Express Middleware Registration Order Bugs
 
-Hay bị miss: middleware auth đăng ký **sau** route definition → route không được protect.
+Commonly missed: authentication middleware registered **after** route definitions → routes remain unprotected.
 
 ```yaml
 phases:
@@ -264,20 +262,19 @@ phases:
       For Express apps: verify that auth middleware is registered BEFORE all
       route definitions it's supposed to protect. Check app.use() call order.
       A route defined before auth middleware registers is unprotected.
-
 ```
 
 ---
 
-## Resume khi bị gián đoạn
+## Resuming Interrupted Runs
 
-Pipeline mất ~5-15 phút tùy model và target size. Nếu bị interrupt:
+A full pipeline takes ~5–15 minutes depending on model and target size. If interrupted:
 
 ```bash
-# Xem session file đã lưu
+# Locate existing session file
 ls .hyperdope-session-*.json
 
-# Resume từ phase bị dừng
+# Resume from the interrupted phase
 npx hd-run --agent agent.yaml \
   --target https://github.com/your-org/your-repo \
   --resume-from confirm \
@@ -286,20 +283,20 @@ npx hd-run --agent agent.yaml \
 
 ---
 
-## Verify patch sau khi vendor fix
+## Verifying Patches After Vendor Fix
 
 ```bash
 npx hd-run --agent agent.yaml \
-  --target "v2.3.1 — diff: https://github.com/org/repo/compare/v2.3.0...v2.3.1" \
+  --target "v2.3.1 - diff: https://github.com/org/repo/compare/v2.3.0...v2.3.1" \
   --phase verify
 ```
 
-Hoặc MCP tool `hd_verify`:
+Or via MCP tool `hd_verify`:
 
 ```
-Gọi hd_verify với:
+Call hd_verify with:
   agent   = "agent.yaml"
-  target  = "v2.3.1 (commit abc1234def) — fix applied in src/download.js"
+  target  = "v2.3.1 (commit abc1234def) - fix applied in src/download.js"
   context = {
     "audit":   "...",
     "confirm": "...",
@@ -307,7 +304,7 @@ Gọi hd_verify với:
   }
 ```
 
-Kết quả mẫu:
+Sample result:
 
 ```json
 {
@@ -318,8 +315,8 @@ Kết quả mẫu:
       "verdict":          "PARTIAL_FIX",
       "q1_root_cause":    "path.join(baseDir, userInput) without realpath+startsWith check",
       "q2_change_analysis": "Fix applied to /api/download handler but same pattern exists in /api/export",
-      "q3_bypass_vector": "GET /api/export?file=../../etc/passwd — same vulnerability, different endpoint",
-      "q4_sibling_sites": "/api/export at src/routes/export.js:43 — identical pattern, not patched",
+      "q3_bypass_vector": "GET /api/export?file=../../etc/passwd - same vulnerability, different endpoint",
+      "q4_sibling_sites": "/api/export at src/routes/export.js:43 - identical pattern, not patched",
       "recommended_action": "Apply same realpath()+startsWith() fix to src/routes/export.js:43"
     }
   ],
@@ -327,4 +324,4 @@ Kết quả mẫu:
 }
 ```
 
-`PARTIAL_FIX` = patch chỉ fix một endpoint, còn endpoint khác vẫn vulnerable. Đây chính xác là giá trị của `hd_verify` — phát hiện incomplete patch.
+`PARTIAL_FIX` = the patch fixes one endpoint, but leaves other endpoints or bypasses vulnerable. This highlights the exact value of `hd_verify` - catching incomplete vendor fixes.

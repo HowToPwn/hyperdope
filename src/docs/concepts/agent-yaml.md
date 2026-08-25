@@ -1,10 +1,10 @@
 # Agent YAML Reference
 
-Mọi tool call của Hyperdope đều nhận param `agent` — đường dẫn đến file YAML config này. File định nghĩa provider LLM, model, và các override tùy chọn theo từng phase.
+Every Hyperdope tool call accepts the `agent` parameter - the path to this YAML config file. The file defines the LLM provider, model, and optional per-phase overrides.
 
 ---
 
-## Ví dụ tối thiểu
+## Minimal Example
 
 ```yaml
 provider: claude
@@ -14,56 +14,56 @@ api_key:  ${ANTHROPIC_API_KEY}
 
 ---
 
-## Full reference
+## Full Reference
 
 ```yaml
 # ── Provider ──────────────────────────────────────────────────────────────────
-# Bắt buộc. Một trong: claude | openai | gemini | ollama
+# Required. One of: claude | openai | gemini | ollama
 provider: claude
 
 # ── Model ────────────────────────────────────────────────────────────────────
-# Bắt buộc. Model ID của provider đã chọn.
+# Required. Model ID for the selected provider.
 model: claude-opus-4-5
 
 # ── API key ──────────────────────────────────────────────────────────────────
-# Dùng cú pháp ${ENV_VAR} để đọc từ environment — không hardcode vào file.
-# Có thể bỏ field này nếu bạn đã set env var chuẩn của provider (xem bảng bên dưới).
+# Use ${ENV_VAR} syntax to read from environment - do not hardcode in file.
+# You can omit this field if you have set the standard provider env var (see table below).
 api_key: ${ANTHROPIC_API_KEY}
 
-# ── Base URL (tuỳ chọn) ───────────────────────────────────────────────────────
-# Override endpoint API. Dùng cho:
+# ── Base URL (optional) ───────────────────────────────────────────────────────
+# Override API endpoint. Used for:
 #   - Azure OpenAI:               https://your-resource.openai.azure.com
 #   - OpenAI-compatible proxy:    http://localhost:8080
-#   - Ollama (mặc định):          http://localhost:11434
+#   - Ollama (default):           http://localhost:11434
 #
-# Bảo mật: base_url bị validate khi gọi — chỉ HTTPS (hoặc HTTP cho localhost),
-# không cho phép địa chỉ RFC1918 và IMDS metadata host.
+# Security: base_url is validated on call - HTTPS only (or HTTP for localhost),
+# RFC1918 addresses and IMDS metadata hosts are blocked.
 base_url: https://api.anthropic.com
 
-# ── Max tokens (tuỳ chọn) ────────────────────────────────────────────────────
-# Số token tối đa cho mỗi response LLM. Mặc định tuỳ provider.
+# ── Max tokens (optional) ────────────────────────────────────────────────────
+# Maximum tokens per LLM response. Defaults depend on provider.
 max_tokens: 8192
 
-# ── Temperature (tuỳ chọn) ───────────────────────────────────────────────────
+# ── Temperature (optional) ───────────────────────────────────────────────────
 # 0.0 = deterministic, 1.0 = creative.
-# Mặc định 0.3 — security research ưu tiên chính xác hơn sáng tạo.
+# Default 0.3 - security research prioritizes precision over creativity.
 temperature: 0.3
 
-# ── Per-phase overrides (tuỳ chọn) ───────────────────────────────────────────
-# Override system prompt hoặc user prefix cho từng phase cụ thể.
-# Bỏ section này nếu muốn dùng prompt mặc định của Hyperdope.
+# ── Per-phase overrides (optional) ───────────────────────────────────────────
+# Override system prompt or user prefix for specific phases.
+# Omit this section to use Hyperdope's built-in defaults.
 phases:
   profile:
-    # Thay hoàn toàn system prompt mặc định
+    # Completely replace the default system prompt
     system: |
       You are a senior threat modeller specialising in cloud-native applications...
 
   audit:
-    # Chỉ override phần đầu user message
+    # Override only the beginning of the user message
     user_prefix: "Focus only on injection vulnerabilities in this Node.js app.\n\n"
 
   assess:
-    # Dùng model rẻ hơn / nhanh hơn cho phase này
+    # Use a cheaper / faster model for this phase
     model: claude-haiku-4-5
 
   draft_ghsa:
@@ -71,26 +71,26 @@ phases:
       You are a security advisory writer. Format all output as GHSA-schema JSON.
 
   verify:
-    # Thêm yêu cầu đặc biệt cho verification
-    user_prefix: "This is a Rust project — focus on memory safety issues.\n\n"
+    # Add special requirements for verification
+    user_prefix: "This is a Rust project - focus on memory safety issues.\n\n"
 ```
 
 ---
 
-## Provider và env var mặc định
+## Providers and Default Environment Variables
 
-Nếu bỏ `api_key` trong YAML, provider tự đọc env var tương ứng:
+If `api_key` is omitted in YAML, the provider automatically reads its corresponding environment variable:
 
-| Provider | `provider` | Env var mặc định | Model ví dụ |
+| Provider | `provider` | Default Env Var | Example Model |
 |---|---|---|---|
 | Anthropic | `claude` | `ANTHROPIC_API_KEY` | `claude-opus-4-5`, `claude-sonnet-4-5`, `claude-haiku-4-5` |
 | OpenAI | `openai` | `OPENAI_API_KEY` | `gpt-4o`, `gpt-4o-mini`, `gpt-4-turbo` |
 | Google | `gemini` | `GOOGLE_API_KEY` | `gemini-2.5-pro`, `gemini-2.5-flash` |
-| Ollama | `ollama` | *(không cần)* | `llama3.3:70b`, `qwen2.5-coder:32b` |
+| Ollama | `ollama` | *(none required)* | `llama3.3:70b`, `qwen2.5-coder:32b` |
 
 ---
 
-## Config từng provider
+## Per-Provider Configuration
 
 ### Claude (Anthropic)
 
@@ -98,7 +98,7 @@ Nếu bỏ `api_key` trong YAML, provider tự đọc env var tương ứng:
 provider: claude
 model:    claude-opus-4-5
 api_key:  ${ANTHROPIC_API_KEY}
-# Hoặc bỏ api_key nếu ANTHROPIC_API_KEY đã set trong env
+# Or omit api_key if ANTHROPIC_API_KEY is already set in environment
 ```
 
 ### OpenAI
@@ -113,7 +113,7 @@ api_key:  ${OPENAI_API_KEY}
 
 ```yaml
 provider: openai
-model:    gpt-4o                              # deployment name của bạn
+model:    gpt-4o                              # your deployment name
 api_key:  ${AZURE_OPENAI_API_KEY}
 base_url: https://your-resource.openai.azure.com/openai/deployments/gpt-4o
 ```
@@ -126,83 +126,83 @@ model:    gemini-2.5-pro
 api_key:  ${GOOGLE_API_KEY}
 ```
 
-### Ollama (local, không cần API key)
+### Ollama (local, no API key required)
 
 ```bash
-# Pull model trước
+# Pull model first
 ollama pull llama3.3:70b
 ```
 
 ```yaml
 provider: ollama
 model:    llama3.3:70b
-# base_url mặc định là http://localhost:11434 — bỏ nếu dùng port mặc định
+# base_url defaults to http://localhost:11434 - omit if using default port
 ```
 
-> **Lưu ý:** Model local thường kém hơn cloud model trong các phase phức tạp như `audit` và `assess`.
-> Khuyến nghị dùng cloud model cho production research.
+> **Note:** Local models typically underperform cloud models on complex phases such as `audit` and `assess`.
+> Cloud models are recommended for production research.
 
 ---
 
-## Environment variable resolution
+## Environment Variable Resolution
 
-Bất kỳ giá trị nào có dạng `${VAR_NAME}` sẽ được resolve từ environment khi load config:
+Any value matching `${VAR_NAME}` syntax is resolved from the environment when loading configuration:
 
 ```yaml
-api_key: ${ANTHROPIC_API_KEY}    # ✅ an toàn — đọc từ env
-api_key: sk-ant-api03-abc123     # ❌ hardcode — hd_scan sẽ flag là "Hardcoded credential"
+api_key: ${ANTHROPIC_API_KEY}    # ✅ secure - reads from env
+api_key: sk-ant-api03-abc123     # ❌ hardcoded - hd_scan will flag as "Hardcoded credential"
 ```
 
-Thứ tự ưu tiên khi tìm API key:
-1. Field `api_key` trong YAML (sau khi resolve env var)
-2. Env var mặc định của provider (`ANTHROPIC_API_KEY`, v.v.)
-3. Lỗi tại runtime nếu không có cả hai
+Resolution priority when looking for API keys:
+1. `api_key` field in YAML (after resolving env vars)
+2. Provider's default environment variable (`ANTHROPIC_API_KEY`, etc.)
+3. Runtime error if neither is present
 
 ---
 
-## Env var `HYPERDOPE_AGENT`
+## `HYPERDOPE_AGENT` Environment Variable
 
-Nếu muốn chỉ định agent config nằm **ngoài working directory** (ví dụ: file config dùng chung cho nhiều project):
+To specify an agent config that lives **outside the working directory** (for example: a shared config file used across multiple projects):
 
 ```bash
 export HYPERDOPE_AGENT=/home/user/.config/hyperdope/agent.yaml
 ```
 
-Khi set env var này, `agent` param trong tool call vẫn cần truyền nhưng sẽ bị override bởi `HYPERDOPE_AGENT`.
+When this environment variable is set, the `agent` parameter in tool calls is still required but will be overridden by `HYPERDOPE_AGENT`.
 
-> Dùng khi làm việc với nhiều project và không muốn copy `agent.yaml` vào từng thư mục.
+> Use this when working across multiple projects to avoid copying `agent.yaml` into every directory.
 
 ---
 
-## Per-phase model override
+## Per-Phase Model Overrides
 
-Mỗi phase có thể dùng model khác nhau — hữu ích để tiết kiệm chi phí:
+Each phase can use a different model - useful for optimizing costs:
 
 ```yaml
 provider: claude
-model:    claude-opus-4-5     # model mặc định cho mọi phase
+model:    claude-opus-4-5     # default model for all phases
 
 phases:
   profile:
-    model: claude-sonnet-4-5  # phase nhẹ hơn, dùng model rẻ hơn
+    model: claude-sonnet-4-5  # lighter phase, use cheaper model
   audit:
-    model: claude-opus-4-5    # phase nặng nhất — giữ model mạnh
+    model: claude-opus-4-5    # heaviest phase - keep strongest model
   confirm:
     model: claude-sonnet-4-5
   assess:
     model: claude-sonnet-4-5
   draft_ghsa:
-    model: claude-haiku-4-5   # phase cuối, format output — model nhanh là đủ
+    model: claude-haiku-4-5   # final phase, formatting output - fast model is sufficient
   disclose:
     model: claude-haiku-4-5
 ```
 
 ---
 
-## Bảo mật
+## Security
 
 | | |
 |---|---|
-| **Không commit `agent.yaml`** | Thêm vào `.gitignore`. `hd_scan` flag file này nếu phát hiện hardcoded key. |
-| **`base_url` bị validate** | HTTPS only (trừ localhost). Không cho phép: `169.254.169.254`, `metadata.google.internal`, dải RFC1918 (`10.x`, `172.16-31.x`, `192.168.x`). |
-| **Path traversal protection** | `agent` param trong tool call bị restrict trong CWD. Dùng `HYPERDOPE_AGENT` env var để trỏ đến file ngoài CWD. |
+| **Do not commit `agent.yaml`** | Add to `.gitignore`. `hd_scan` flags this file if it detects hardcoded keys. |
+| **`base_url` is validated** | HTTPS only (except localhost). Blocked: `169.254.169.254`, `metadata.google.internal`, RFC1918 ranges (`10.x`, `172.16-31.x`, `192.168.x`). |
+| **Path traversal protection** | `agent` parameter in tool calls is restricted within CWD. Use `HYPERDOPE_AGENT` env var to point to files outside CWD. |

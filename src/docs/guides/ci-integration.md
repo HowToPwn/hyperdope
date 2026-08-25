@@ -4,7 +4,7 @@ Run `hd-ci` as part of your pull request checks to catch new CVEs, hardcoded sec
 
 ---
 
-## What `hd-ci` does
+## What `hd-ci` Does
 
 1. Scans all detected lockfiles (`package-lock.json`, `requirements.txt`, `poetry.lock`, `Pipfile.lock`, `go.mod`, `Cargo.lock`) against OSV.dev
 2. Runs secret detection on config files in the project root
@@ -16,7 +16,7 @@ No LLM API key is required.
 
 ---
 
-## Basic workflow
+## Basic Workflow
 
 ```yaml
 # .github/workflows/hyperdope-scan.yml
@@ -44,7 +44,7 @@ jobs:
 
       - name: Run Hyperdope CI scan
         run: npx hd-ci --target ./ --sarif-out hd-results.sarif.json
-        # Exit code 1 if any High/Critical finding — fails the job
+        # Exit code 1 if any High/Critical finding - fails the job
 
       - name: Upload SARIF to GitHub Code Scanning
         if: always()   # upload even if the scan step fails
@@ -58,7 +58,7 @@ Findings appear in the **Security → Code Scanning** tab of your repository.
 
 ---
 
-## Threshold configuration
+## Threshold Configuration
 
 | Threshold | Effect |
 |---|---|
@@ -75,19 +75,19 @@ Findings appear in the **Security → Code Scanning** tab of your repository.
 
 ---
 
-## Scan-only mode (no build failure)
+## Scan-Only Mode (No Build Failure)
 
 If you want to collect findings without blocking the build:
 
 ```yaml
 - name: Hyperdope scan (advisory only)
   run: npx hd-ci --target ./ --threshold none --sarif-out hd-results.sarif.json
-  # Always exits 0 — never fails the build
+  # Always exits 0 - never fails the build
 ```
 
 ---
 
-## JSON output for downstream steps
+## JSON Output for Downstream Steps
 
 ```yaml
 - name: Hyperdope scan (JSON)
@@ -102,7 +102,7 @@ If you want to collect findings without blocking the build:
 
 ---
 
-## Multiple ecosystems in a monorepo
+## Multiple Ecosystems in a Monorepo
 
 ```yaml
 - name: Scan backend (Python)
@@ -128,7 +128,7 @@ If you want to collect findings without blocking the build:
 
 ---
 
-## Weekly scheduled scan
+## Weekly Scheduled Scan
 
 Catch newly published CVEs for pinned dependency versions:
 
@@ -183,7 +183,7 @@ jobs:
               owner: context.repo.owner,
               repo:  context.repo.repo,
               title: `[Hyperdope] ${summary.breaching_findings} new vulnerability finding(s)`,
-              body:  `## Weekly CVE scan — ${new Date().toISOString().split('T')[0]}\n\n${lines}\n\nSee the [Security tab](../../security/code-scanning) for details.`,
+              body:  `## Weekly CVE scan - ${new Date().toISOString().split('T')[0]}\n\n${lines}\n\nSee the [Security tab](../../security/code-scanning) for details.`,
               labels: ['security', 'dependencies'],
             });
 ```
@@ -192,7 +192,7 @@ jobs:
 
 ## Notes
 
-- **Pin action SHAs** — use the full 40-character commit SHA for all `uses:` actions, not version tags. Tags can be moved (supply chain attack vector).
-- **`security-events: write`** — required for `upload-sarif`. Ensure your workflow has this permission.
-- `hd-ci` does not require an LLM API key — it only talks to OSV.dev.
+- **Pin action SHAs** - use the full 40-character commit SHA for all `uses:` actions, not version tags. Tags can be moved (supply chain attack vector).
+- **`security-events: write`** - required for `upload-sarif`. Ensure your workflow has this permission.
+- `hd-ci` does not require an LLM API key - it only talks to OSV.dev.
 - SARIF results are scoped to the run that produced them; re-runs overwrite previous results in the same `category`.

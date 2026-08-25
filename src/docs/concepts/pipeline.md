@@ -1,39 +1,39 @@
-# Pipeline — Cách Hyperdope hoạt động
+# Pipeline - How Hyperdope Works
 
-Hyperdope tổ chức security research thành **6 phase tuần tự**, mô phỏng đúng quy trình mà researcher thực tế làm — từ mapping attack surface đến gói disclosure hoàn chỉnh.
+Hyperdope organizes security research into **6 sequential phases**, mirroring the exact workflow of real-world researchers - from attack surface mapping to a complete disclosure package.
 
 ---
 
-## Tổng quan
+## Overview
 
 ```
-Phase 0  hd_scan          ← Không cần LLM. Scan CVE, secret, hook.
+Phase 0  hd_scan          ← No LLM required. Scan CVEs, secrets, hooks.
    ↓ CVE list, SBOM, secrets, hooks
-Phase 1  hd_profile       ← LLM map attack surface (STRIDE)
+Phase 1  hd_profile       ← LLM maps attack surface (STRIDE)
    ↓ surface categories, trust boundaries, data flows
-Phase 2  hd_audit         ← LLM hunt source→sink, control gap
+Phase 2  hd_audit         ← LLM hunts source→sink, control gaps
    ↓ candidate vulnerabilities, chain candidates
-Phase 3  hd_confirm       ← LLM generate PoC
+Phase 3  hd_confirm       ← LLM generates PoCs
    ↓ exploit scripts, reliability rating, detection likelihood
 Phase 4  hd_assess        ← LLM + math: CVSS v3.1
    ↓ CVSS vector + verified score, blast radius
-Phase 5  hd_draft_ghsa    ← LLM draft GHSA advisory
+Phase 5  hd_draft_ghsa    ← LLM drafts GHSA advisory
    ↓ advisory schema, remediation priority
-Phase 6  hd_disclose      ← LLM tạo disclosure package
+Phase 6  hd_disclose      ← LLM generates disclosure package
    ↓ exec brief + technical advisory + vendor email
 
 (optional)
-  hd_verify               ← Sau khi vendor patch: xác nhận fix
+  hd_verify               ← After vendor patch: confirm fix
    ↓ PATCHED / PARTIAL_FIX / STILL_VULNERABLE / CANNOT_VERIFY
 ```
 
 ---
 
-## Chạy pipeline
+## Running the Pipeline
 
-### Cách 1 — `hd_run` / `hd-run` (khuyến nghị)
+### Option 1 - `hd_run` / `hd-run` (Recommended)
 
-Chạy toàn bộ 6 phase tự động, context được chain và trim tự động:
+Runs all 6 phases automatically with context chaining and trimming handled under the hood:
 
 ```bash
 # CLI
@@ -43,7 +43,7 @@ npx hd-run --agent agent.yaml --target https://github.com/org/repo
 hd_run(agent="agent.yaml", target="https://github.com/org/repo")
 ```
 
-Session được lưu vào `.hyperdope-session-<timestamp>.json`. Resume nếu bị gián đoạn:
+Session state is persisted to `.hyperdope-session-<timestamp>.json`. Resume if interrupted:
 
 ```bash
 npx hd-run --agent agent.yaml \
@@ -52,22 +52,22 @@ npx hd-run --agent agent.yaml \
   --session-file .hyperdope-session-20260825T141032.json
 ```
 
-### Cách 2 — Gọi từng tool riêng lẻ
+### Option 2 - Invoking Tools Individually
 
-Gọi từng phase trong MCP client, truyền output của phase trước vào `context` của phase sau:
+Invoke each phase individually in your MCP client, passing previous phase outputs into the `context` parameter:
 
 ```
-# Bước 1
+# Step 1
 result_profile = hd_profile(agent="agent.yaml", target="...")
 
-# Bước 2 — truyền toàn bộ output của profile vào context
+# Step 2 - pass entire profile output into context
 result_audit = hd_audit(
   agent="agent.yaml",
   target="...",
-  context={"profile": result_profile.raw}   ← đây là string JSON
+  context={"profile": result_profile.raw}   ← JSON string
 )
 
-# Bước 3
+# Step 3
 result_confirm = hd_confirm(
   agent="agent.yaml",
   target="...",
@@ -78,25 +78,25 @@ result_confirm = hd_confirm(
 )
 ```
 
-> **Lưu ý:** `context` nhận object `{phase_name: raw_string}`. Giá trị là **chuỗi JSON** (raw output của phase trước), không phải object đã parse. `hd_run` làm việc này tự động — đó là lý do nên dùng `hd_run` thay vì gọi từng tool.
+> **Note:** `context` accepts `{phase_name: raw_string}`. Values are **JSON strings** (raw output from the previous phase), not parsed objects. `hd_run` manages this automatically - which is why using `hd_run` is recommended over invoking tools manually.
 
 ---
 
-## Context trimming
+## Context Trimming
 
-Mỗi phase trim context trước khi gửi lên LLM để tránh vượt context window. Logic trim:
+Each phase trims context before dispatching to the LLM to prevent context window overflow:
 
-- Giữ toàn bộ output của **phase ngay trước**
-- Tóm tắt hoặc cắt bớt các phase xa hơn
-- Không bao giờ trim output của chính phase hiện tại
+- Preserves the full output of the **immediately preceding phase**
+- Summarizes or truncates earlier phases
+- Never trims output from the current phase
 
-Ví dụ: khi chạy `assess`, context sẽ có đầy đủ `confirm` và `audit`, nhưng `profile` có thể bị trim nếu quá dài.
+For example: when running `assess`, context will retain complete `confirm` and `audit` data, while `profile` may be truncated if too large.
 
 ---
 
-## Prompt injection mitigation
+## Prompt Injection Mitigation
 
-Mọi content do attacker kiểm soát (target URL, file content, output từ phase trước) đều được wrap trong XML tag:
+All attacker-controlled content (target URLs, source file contents, outputs from prior phases) is encapsulated in XML tags:
 
 ```
 <pipeline_data label="audit_findings">
@@ -104,19 +104,19 @@ Mọi content do attacker kiểm soát (target URL, file content, output từ ph
 </pipeline_data>
 ```
 
-System prompt của mỗi phase hướng dẫn model xử lý mọi thứ trong `<pipeline_data>` như **data để phân tích**, không phải instruction. Điều này ngăn repository độc hại inject lệnh vào agent.
+Each phase's system prompt instructs the model to treat everything inside `<pipeline_data>` strictly as **data for analysis**, never as actionable instructions. This prevents untrusted repositories from injecting commands into the agent.
 
 ---
 
-## Chi tiết từng phase
+## Phase-by-Phase Breakdown
 
-### Phase 0 — `hd_scan` (không dùng LLM)
+### Phase 0 - `hd_scan` (No LLM Required)
 
-**Input:** Đường dẫn thư mục chứa lockfile.
+**Input:** Path to directory containing lockfiles.
 
-**Làm gì:** Query OSV.dev batch API cho mọi ecosystem được phát hiện. Scan secret trong config file. Kiểm tra npm lifecycle hook.
+**Function:** Queries the OSV.dev batch API for all detected ecosystems. Scans for hardcoded secrets in configuration files. Analyzes npm lifecycle hooks.
 
-**Lockfile được hỗ trợ:**
+**Supported Lockfiles:**
 
 | Ecosystem | File |
 |---|---|
@@ -125,7 +125,7 @@ System prompt của mỗi phase hướng dẫn model xử lý mọi thứ trong 
 | Go | `go.mod` |
 | Rust | `Cargo.lock` |
 
-**Output chính:**
+**Key Output:**
 
 ```json
 {
@@ -167,55 +167,55 @@ System prompt của mỗi phase hướng dẫn model xử lý mọi thứ trong 
 
 ---
 
-### Phase 1 — `hd_profile` (LLM)
+### Phase 1 - `hd_profile` (LLM)
 
 **Input:** Target descriptor (URL, path, description).
 
-**Làm gì:** Map attack surface dùng STRIDE. Identify data flow, trust boundary, parser, auth mechanism, deserialization, supply chain, LLM surface.
+**Function:** Maps the attack surface using STRIDE. Identifies data flows, trust boundaries, parsers, authentication mechanisms, deserialization sinks, supply chain dependencies, and LLM surfaces.
 
-**Output:** Danh sách surface category với priority P0/P1/P2, STRIDE applicability, evidence, attack vectors.
+**Output:** Surface categories categorized by priority P0/P1/P2, STRIDE applicability, observable evidence, and attack vectors.
 
-**Tại sao chạy trước?** Không thể hunt hiệu quả nếu không biết những gì tồn tại. Profile là research brief định hướng cho mọi phase sau.
+**Why run this first?** You cannot hunt vulnerabilities effectively without mapping what exists. Profile serves as the research brief guiding all subsequent phases.
 
 ---
 
-### Phase 2 — `hd_audit` (LLM)
+### Phase 2 - `hd_audit` (LLM)
 
 **Input:** Target + profile context.
 
-**Làm gì:** 5-step adversarial hunt:
+**Function:** 5-step adversarial hunt:
 1. Entry point inventory
 2. Source → sink tracing
 3. Control gap analysis (auth, validation, escaping, serialization)
-4. Assumption violation (code assume gì mà attacker có thể vi phạm?)
+4. Assumption violation (what does the code assume that an attacker can break?)
 5. Chain candidate identification
 
-**Output:** Candidate vulnerabilities với title, CWE, affected component, attack scenario, severity estimate.
+**Output:** Candidate vulnerabilities with title, CWE, affected component, attack scenario, and severity estimate.
 
 ---
 
-### Phase 3 — `hd_confirm` (LLM)
+### Phase 3 - `hd_confirm` (LLM)
 
 **Input:** Target + audit findings.
 
-**Làm gì:** Generate tối đa 3 PoC per finding, xếp theo exploitability. Mỗi PoC gồm:
-- Trigger sequence step-by-step
-- Payload / request mẫu
+**Function:** Generates up to 3 PoCs per finding, ordered by exploitability. Each PoC includes:
+- Step-by-step trigger sequence
+- Sample payload / request
 - Expected vs actual outcome
 - Reliability rating: `deterministic` / `probabilistic` / `timing-dependent`
 - Detection likelihood: `low` / `medium` / `high`
 
-**Tại sao trước CVSS?** Metric CVSS (Attack Complexity, Privileges Required, User Interaction) được đặt dựa trên PoC thực tế — không phải ước tính.
+**Why before CVSS?** CVSS metrics (Attack Complexity, Privileges Required, User Interaction) are derived from observable PoC mechanics - not speculative estimates.
 
 ---
 
-### Phase 4 — `hd_assess` (LLM + math)
+### Phase 4 - `hd_assess` (LLM + Math)
 
 **Input:** Target + audit + confirm context.
 
-**Làm gì:** Assign CVSS v3.1 vector với per-metric chain-of-thought. Score được **tính toán toán học từ vector** — LLM không thể hallucinate số không khớp vector. Cũng ước tính blast radius, chaining potential, và scope (S:C khi vượt security boundary).
+**Function:** Assigns a CVSS v3.1 vector with per-metric chain-of-thought. The score is **calculated mathematically from the vector** - the LLM cannot hallucinate mismatched scores. Also evaluates blast radius, chaining potential, and scope (`S:C` when crossing security boundaries).
 
-**Output ví dụ:**
+**Sample Output:**
 
 ```json
 {
@@ -224,63 +224,63 @@ System prompt của mỗi phase hướng dẫn model xử lý mọi thứ trong 
   "cvss_score":       9.1,
   "severity":         "critical",
   "reasoning": {
-    "AV": "Network — reachable over internet without physical access",
-    "AC": "Low — no special conditions required",
-    "PR": "None — unauthenticated endpoint",
-    "UI": "None — no victim interaction needed",
-    "S":  "Unchanged — attacker cannot jump to other systems",
-    "C":  "High — arbitrary file read leaks all server secrets",
-    "I":  "High — arbitrary file write achieves RCE",
-    "A":  "None — service remains available"
+    "AV": "Network - reachable over internet without physical access",
+    "AC": "Low - no special conditions required",
+    "PR": "None - unauthenticated endpoint",
+    "UI": "None - no victim interaction needed",
+    "S":  "Unchanged - attacker cannot jump to other systems",
+    "C":  "High - arbitrary file read leaks all server secrets",
+    "I":  "High - arbitrary file write achieves RCE",
+    "A":  "None - service remains available"
   }
 }
 ```
 
 ---
 
-### Phase 5 — `hd_draft_ghsa` (LLM)
+### Phase 5 - `hd_draft_ghsa` (LLM)
 
 **Input:** Target + audit + confirm + assess context.
 
-**Làm gì:** Generate GitHub Security Advisory draft theo GHSA schema, bao gồm:
+**Function:** Generates a GitHub Security Advisory draft adhering to the GHSA schema:
 - Package name + affected version range
 - CWE IDs
 - CVSS vector
 - Description (executive summary + technical root cause)
 - Remediation guidance
-- Priority: P1 (7 ngày) / P2 (30 ngày) / P3 (90 ngày)
+- Priority: P1 (7 days) / P2 (30 days) / P3 (90 days)
 - Disclosure readiness checklist
 
 ---
 
-### Phase 6 — `hd_disclose` (LLM)
+### Phase 6 - `hd_disclose` (LLM)
 
-**Input:** Toàn bộ context các phase trước.
+**Input:** Full context from all previous phases.
 
-**Làm gì:** Generate disclosure package hoàn chỉnh:
-1. **Executive brief** — 3–5 câu, dành cho CISO / VP Engineering
-2. **Full technical advisory** — root cause, PoC, impact, IoCs, remediation diff
-3. **Vendor notification email** — professional tone, 90-day timeline table
+**Function:** Generates a complete disclosure package:
+1. **Executive brief** - 3–5 sentences tailored for CISOs / VPs of Engineering
+2. **Full technical advisory** - root cause, PoC, impact, IoCs, remediation diff
+3. **Vendor notification email** - professional tone with 90-day timeline table
 
 ---
 
-### `hd_verify` — Patch verification (LLM)
+### `hd_verify` - Patch Verification (LLM)
 
-**Chạy khi nào:** Sau khi vendor release patch.
+**When to run:** After the vendor releases a patch.
 
 **Input:** Patch descriptor (commit SHA, version tag, diff URL) + audit/confirm/assess context.
 
-**Methodology — 4 câu hỏi:**
-- **Q1:** Root cause chính xác là gì? (function, file, điều kiện lỗi)
-- **Q2:** Patch thay đổi gì? Có đúng chỗ root cause không?
-- **Q3:** PoC gốc còn trigger được qua path khác hay encoding khác không?
-- **Q4:** Có sibling site nào cùng pattern mà patch bỏ sót không?
+**Methodology - 4 Core Questions:**
+- **Q1:** What is the exact root cause? (function, file, failure condition)
+- **Q2:** What did the patch change? Does it address the exact root cause site?
+- **Q3:** Can the original PoC still trigger via alternate paths or encodings?
+- **Q4:** Are there sibling call sites with identical patterns that the patch missed?
 
 **Verdicts:**
 
-| Verdict | Ý nghĩa |
+| Verdict | Definition |
 |---|---|
-| `PATCHED` | Root cause được xử lý ở mọi call site. PoC không còn work. |
-| `PARTIAL_FIX` | Patch một vector nhưng còn bypass hoặc sibling chưa fix. |
-| `STILL_VULNERABLE` | Patch không có hoặc không hiệu quả. PoC vẫn work. |
-| `CANNOT_VERIFY` | Không đủ thông tin (không có diff/source) để kết luận. |
+| `PATCHED` | Root cause is resolved across all call sites. PoC no longer works. |
+| `PARTIAL_FIX` | Mitigates one vector but leaves bypasses or sibling sites unpatched. |
+| `STILL_VULNERABLE` | Patch is missing or ineffective. PoC continues to work. |
+| `CANNOT_VERIFY` | Insufficient information (missing diff/source) to determine status. |
