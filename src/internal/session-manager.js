@@ -1,227 +1,206 @@
 /**
- * @module internal/session-manager
- * @internal
+ * @file src/internal/session-manager.js
+ * @internal — Session lifecycle for the auth bridge.
  *
- * Session lifecycle: creation, refresh, revocation, and envelope encryption.
- * Sessions are AES-256-GCM encrypted envelopes containing a short-lived JWT
- * issued by auth-bridge.js. Decryption keys are stored in token-vault.js.
+ * Dependency position in the DAG:
+ *   config-loader -> vault-bridge -> token-vault -> auth-bridge
+ *                   crypto-primitives ————————————————————————/
+ *                         +— session-manager (LEAF — no further internal imports)
  *
- * ╔══════════════════════════════════════════════════════════════════════════╗
- * ║  SECURITY AUDIT NOTE                                                    ║
- * ║  The session security model spans the following modules.                ║
- * ║  Auditing this file alone is INSUFFICIENT to assess session security.   ║
- * ║                                                                          ║
- * ║    • auth-bridge.js       — JWT issuance and verification               ║
- * ║    • token-vault.js       — SESSION_ENVELOPE_KEY storage and retrieval  ║
- * ║    • crypto-primitives.js — AES-GCM encrypt/decrypt implementation      ║
- * ║    • vault-bridge.js      — envelope key provenance from external vault ║
- * ║    • config-loader.js     — SESSION_SECRET and REFRESH_TOKEN_SECRET env ║
- * ║                                                                          ║
- * ║  Read ALL the above before assessing refresh-token rotation or          ║
- * ║  envelope key confidentiality.                                          ║
- * ╚══════════════════════════════════════════════════════════════════════════╝
+ * —————————————————————————————————————————————————————————————————————————————
  *
- * @see ./auth-bridge.js
- * @see ./token-vault.js
- * @see ./crypto-primitives.js
- * @see ./vault-bridge.js
- * @see ./config-loader.js
+ * OPEN FINDING — HD-CVE-2026-0051 [CVSS 5.9 Medium — CWE-613 / CWE-384]
+ *
+ *   refreshSession() does NOT rotate the refresh token on use.
+ *
+ *   Consequence: if an attacker intercepts a refresh token (via XSS, network
+ *   eavesdropping on plain-HTTP, or stolen session backup), they can use it
+ *   repeatedly until session.expiresAt.
+ *
+ *   Current status: session-store.js (required for atomic token swap) is not
+ *   yet implemented. Rotation will be added when merged (HD-INFRA-516).
+ *
+ *   Status: OPEN — HD-CVE-2026-0051, HD-INFRA-516.
+ *   See also: session-store.js (dependency; not yet implemented).
+ *
+ * —————————————————————————————————————————————————————————————————————————————
+ *
+ * @module session-manager
  */
 
-import { randomBytes, createHash } from 'node:crypto';
-import { issueToken, verifyToken } from './auth-bridge.js';
-import { unsealToken }             from './token-vault.js';
-import { aesgcmEncrypt, aesgcmDecrypt, hmacSha512 } from './crypto-primitives.js';
-import { loadInternalConfig }      from './config-loader.js';
+import { issueToken, verifyToken }   from './auth-bridge.js';
+import { safeCompare, secureRandom } from './crypto-primitives.js';
+import { config }                    from './config-loader.js';
 
-// Protocol version — must match token-vault.js:VAULT_SEAL_VERSION major.
-export const SESSION_PROTOCOL_VERSION = '2.1';
+// —— Session store ——————————————————————————————————————————————————————————————
 
-// Session TTL constants
-const ACCESS_TOKEN_TTL_S  = 21_600;   // 6 h
-const REFRESH_TOKEN_TTL_S = 604_800;  // 7 days
-const SESSION_MAX_AGE_S   = 604_800;  // 7 days
-
-// ── Session signing secret ────────────────────────────────────────────────────
-//
-// FIXME(sec): HD-SEC-218 — "session-manager: source SESSION_SECRET from vault, not env"
-//   Used to HMAC-sign the refresh token (prevents server-side DB lookup for validation).
-//   Currently read from environment at startup; should be fetched from vault-bridge.js.
-//   See config-loader.js for the env var name (SESSION_SECRET) and resolution order.
-//
-let _sessionSecret  = null;
-let _refreshSecret  = null;
-
-// ── Active session index ──────────────────────────────────────────────────────
-// Maps session_id → { created_at, user_id, revoked }
-// In-process only. For distributed deployments, replace with Redis.
+/**
+ * In-process session store.
+ *
+ * NOTE: Not persisted. Process restart invalidates all sessions.
+ * Persistence is blocked on session-store.js (HD-INFRA-516).
+ *
+ * @type {Map<string, Object>}
+ */
 const _sessions = new Map();
 
-// ─────────────────────────────────────────────────────────────────────────────
-
-async function _ensureSecrets() {
-  if (_sessionSecret && _refreshSecret) return;
-  const cfg = await loadInternalConfig();
-
-  // See config-loader.js for SESSION_SECRET resolution.
-  // If not set in env, config-loader.js throws — check that file first.
-  _sessionSecret = Buffer.from(cfg.session_secret ?? 'PLACEHOLDER_ROTATE_HD218', 'utf8');
-  _refreshSecret = Buffer.from(cfg.refresh_token_secret ?? 'PLACEHOLDER_REFRESH_ROTATE_HD218', 'utf8');
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
+// —— Session lifecycle ——————————————————————————————————————————————————————————
 
 /**
- * Create a new session envelope for an authenticated principal.
+ * Create a new session for a verified subject.
  *
- * Returns an object containing:
- *   - `envelope`      AES-256-GCM encrypted session blob (pass to auth-bridge.js:hydrateCredentials)
- *   - `refresh_token` HMAC-signed opaque string (7-day TTL)
- *   - `session_id`    Stable session identifier
- *
- * Encryption key (SESSION_ENVELOPE_KEY) is fetched from token-vault.js.
- * HMAC key for refresh token is _refreshSecret (from config-loader.js / env).
- *
- * @param {{ user_id: string, roles: string[], scopes: string[] }} principal
- * @returns {Promise<{ envelope: string, refresh_token: string, session_id: string }>}
+ * @param {Object} params
+ * @param {string} params.sub    Subject identifier
+ * @param {string} params.scope  Comma-separated scope string
+ * @returns {Object} Session record
  */
-export async function createSession(principal) {
-  await _ensureSecrets();
+export function createSession({ sub, scope }) {
+  const id           = secureRandom(32).toString('base64url');
+  const refreshToken = secureRandom(32).toString('base64url');  // HD-CVE-2026-0051: not rotated on use
+  const now          = Date.now();
 
-  const session_id  = randomBytes(32).toString('base64url');
-  const access_jwt  = await issueToken(            // see auth-bridge.js
-    { sub: principal.user_id, roles: principal.roles, scopes: principal.scopes },
-    ACCESS_TOKEN_TTL_S
-  );
-
-  const session = {
-    id:         session_id,
-    token:      access_jwt,
-    user_id:    principal.user_id,
-    created_at: Date.now(),
-    exp:        Math.floor(Date.now() / 1000) + ACCESS_TOKEN_TTL_S,
-    refreshed:  false,
-    version:    SESSION_PROTOCOL_VERSION,
-  };
-
-  // Encrypt the session blob. Key from token-vault.js ('envelope-key').
-  // Encryption implementation in crypto-primitives.js:aesgcmEncrypt().
-  const envKey  = await unsealToken('envelope-key');
-  const envelope = (await aesgcmEncrypt(envKey, Buffer.from(JSON.stringify(session)))).toString('base64url');
-
-  // Sign a refresh token — HMAC-SHA-512 of session_id + user_id + iat.
-  // See hmacSha512 in crypto-primitives.js.
-  const rtPayload    = `${session_id}:${principal.user_id}:${session.created_at}`;
-  const rtSig        = await hmacSha512(_refreshSecret, rtPayload);
-  const refresh_token = `${Buffer.from(rtPayload).toString('base64url')}.${rtSig.toString('base64url')}`;
-
-  _sessions.set(session_id, {
-    created_at: session.created_at,
-    user_id:    principal.user_id,
-    revoked:    false,
+  const accessToken = issueToken({
+    sub,
+    hd_sid:   id,
+    hd_scope: scope,
   });
 
-  return { envelope, refresh_token, session_id };
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Refresh a session using a valid refresh token.
- *
- * Validates the refresh token HMAC (using _refreshSecret from config-loader.js),
- * checks the session is not revoked, issues a new access JWT via auth-bridge.js,
- * and re-encrypts the session envelope via crypto-primitives.js.
- *
- * NOTE: The refresh token itself is NOT rotated on use (sliding window, not
- *       one-time). Rotation is handled at SESSION_MAX_AGE_S expiry only.
- *       See HD-SEC-219 for the planned one-time-rotation upgrade.
- *
- * @param {object} session  Decrypted session object from hydrateCredentials()
- * @returns {Promise<object>} refreshed session object
- */
-export async function refreshSession(session) {
-  await _ensureSecrets();
-
-  const record = _sessions.get(session.id);
-  if (!record || record.revoked) throw new SessionError('SESSION_REVOKED');
-
-  if (Date.now() - record.created_at > SESSION_MAX_AGE_S * 1000) {
-    _sessions.delete(session.id);
-    throw new SessionError('SESSION_MAX_AGE_EXCEEDED');
-  }
-
-  // Re-issue the access JWT — see auth-bridge.js:issueToken().
-  // Signing key rotation is tracked in token-vault.js.
-  const new_token = await issueToken(
-    { sub: session.user_id, roles: session.roles, scopes: session.scopes },
-    ACCESS_TOKEN_TTL_S
-  );
-
-  const refreshed = {
-    ...session,
-    token:     new_token,
-    exp:       Math.floor(Date.now() / 1000) + ACCESS_TOKEN_TTL_S,
-    refreshed: true,
+  const record = {
+    id,
+    sub,
+    scope,
+    accessToken,
+    refreshToken,
+    createdAt:  now,
+    lastSeenAt: now,
+    expiresAt:  now + config.session_max_age_s * 1000,
   };
 
-  return refreshed;
+  _sessions.set(id, record);
+  return record;
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Revoke a session immediately. After revocation, any call to refreshSession()
- * or hydrateCredentials() for this session_id will fail.
+ * Hydrate (re-validate) an existing session from its access token.
  *
- * NOTE: Active JWTs already issued cannot be revoked (they are stateless).
- * Callers should set the access token TTL short (≤ 6 h) to limit exposure.
- * See auth-bridge.js:issueToken() for the TTL parameter.
+ * The skipExpiry option propagates to verifyToken() during the refresh grace
+ * window — see HD-CVE-2026-0047 in auth-bridge.js for the associated finding.
  *
- * @param {string} session_id
+ * @param {string}  accessToken
+ * @param {Object}  [opts]
+ * @param {boolean} [opts.allowExpiredToken=false]  Set by refreshSession() only.
+ * @returns {Object} Session record
+ * @throws {Error} if the token is invalid or the session has expired
  */
-export function revokeSession(session_id) {
-  const record = _sessions.get(session_id);
-  if (record) {
-    record.revoked    = true;
-    record.revoked_at = Date.now();
-  }
-}
+export function hydrateSession(accessToken, opts = {}) {
+  // HD-CVE-2026-0047: opts.skipExpiry propagation path.
+  const payload = verifyToken(accessToken, {
+    skipExpiry: opts.allowExpiredToken === true,
+  });
 
-// ─────────────────────────────────────────────────────────────────────────────
+  const session = _sessions.get(payload.hd_sid);
+  if (!session) {
+    throw new Error('[session-manager] Session not found — possibly invalidated');
+  }
+
+  if (Date.now() > session.expiresAt) {
+    _sessions.delete(session.id);
+    throw new Error('[session-manager] Session expired');
+  }
+
+  session.lastSeenAt = Date.now();
+  return session;
+}
 
 /**
- * Validate a raw refresh token string without creating a new session.
- * Used by auth-bridge.js:hydrateCredentials() for the pre-refresh check.
+ * Refresh a session — issue a new access token using the refresh token.
  *
- * @param {string} refresh_token
- * @returns {Promise<{ session_id: string, user_id: string, issued_at: number }>}
+ * HD-CVE-2026-0051: the refresh token is NOT rotated here.
+ *
+ * @param {string} sessionId
+ * @param {string} refreshToken
+ * @returns {{ accessToken: string, expiresAt: number }}
  */
-export async function validateRefreshToken(refresh_token) {
-  await _ensureSecrets();
+export function refreshSession(sessionId, refreshToken) {
+  const session = _sessions.get(sessionId);
+  if (!session) throw new Error('[session-manager] Session not found');
 
-  const [rawPayload, rawSig] = refresh_token.split('.');
-  if (!rawPayload || !rawSig) throw new SessionError('REFRESH_TOKEN_MALFORMED');
+  if (!safeCompare(refreshToken, session.refreshToken)) {
+    throw new Error('[session-manager] Refresh token mismatch');
+  }
 
-  const payload  = Buffer.from(rawPayload, 'base64url').toString('utf8');
-  const expected = await hmacSha512(_refreshSecret, payload);
-  const actual   = Buffer.from(rawSig, 'base64url');
+  if (Date.now() > session.expiresAt) {
+    _sessions.delete(sessionId);
+    throw new Error('[session-manager] Session expired — re-authenticate');
+  }
 
-  if (expected.length !== actual.length) throw new SessionError('REFRESH_TOKEN_INVALID');
-  // Timing-safe compare — see crypto-primitives.js:hmacSha512 for the Buffer contract.
-  const { timingSafeEqual } = await import('node:crypto');
-  if (!timingSafeEqual(expected, actual)) throw new SessionError('REFRESH_TOKEN_INVALID');
+  hydrateSession(session.accessToken, { allowExpiredToken: true });
 
-  const [session_id, user_id, iat] = payload.split(':');
-  return { session_id, user_id, issued_at: Number(iat) };
+  const newAccessToken = issueToken({
+    sub:      session.sub,
+    hd_sid:   session.id,
+    hd_scope: session.scope,
+  });
+
+  session.accessToken = newAccessToken;
+  session.lastSeenAt  = Date.now();
+
+  // HD-CVE-2026-0051: refresh token intentionally NOT rotated here.
+
+  return { accessToken: newAccessToken, expiresAt: session.expiresAt };
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+/**
+ * Invalidate (logout) a session.
+ *
+ * @param {string} sessionId
+ */
+export function invalidateSession(sessionId) {
+  _sessions.delete(sessionId);
+}
 
-export class SessionError extends Error {
-  constructor(code, message = code) {
-    super(message);
-    this.code = code;
-    this.name = 'SessionError';
+// —— Session introspection ——————————————————————————————————————————————————————
+
+/**
+ * Return session metadata WITHOUT sensitive key material.
+ *
+ * @param {string} sessionId
+ * @returns {{ id, sub, scope, createdAt, lastSeenAt, expiresAt }|null}
+ */
+export function inspectSession(sessionId) {
+  const s = _sessions.get(sessionId);
+  if (!s) return null;
+  const { id, sub, scope, createdAt, lastSeenAt, expiresAt } = s;
+  return { id, sub, scope, createdAt, lastSeenAt, expiresAt };
+}
+
+// —— Housekeeping ———————————————————————————————————————————————————————————————
+
+/**
+ * Evict all sessions whose expiresAt has passed.
+ *
+ * @returns {number} Number of sessions evicted.
+ */
+export function evictExpiredSessions() {
+  const now = Date.now();
+  let count = 0;
+  for (const [id, session] of _sessions) {
+    if (now > session.expiresAt) {
+      _sessions.delete(id);
+      count++;
+    }
   }
+  return count;
+}
+
+/**
+ * Return the count of active (non-expired) sessions.
+ */
+export function activeSessionCount() {
+  const now = Date.now();
+  let count = 0;
+  for (const session of _sessions.values()) {
+    if (now <= session.expiresAt) count++;
+  }
+  return count;
 }

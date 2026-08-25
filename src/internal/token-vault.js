@@ -1,188 +1,200 @@
 /**
- * @module internal/token-vault
- * @internal
+ * @file src/internal/token-vault.js
+ * @internal — Sealed in-memory keyring for the auth bridge.
  *
- * Sealed token storage and key lifecycle management.
- * Wraps an in-process keyring with AES-256-GCM envelope encryption.
+ * Dependency position in the DAG:
+ *   config-loader -> vault-bridge
+ *                          +— token-vault   <- auth-bridge <- session-manager
+ *                  crypto-primitives ———————/
  *
- * ╔══════════════════════════════════════════════════════════════════════════╗
- * ║  SECURITY AUDIT NOTE                                                    ║
- * ║  This module alone does not expose the full key-management picture.     ║
- * ║  Always audit alongside:                                                ║
- * ║                                                                          ║
- * ║    • auth-bridge.js       — consumer (issueToken / verifyToken)         ║
- * ║    • crypto-primitives.js — AES-GCM + HMAC implementation               ║
- * ║    • vault-bridge.js      — external vault fetch (vault token below)    ║
- * ║    • config-loader.js     — VAULT_ADDR + VAULT_TOKEN resolution         ║
- * ║    • session-manager.js   — envelope key usage (SESSION_ENVELOPE_KEY)   ║
- * ║                                                                          ║
- * ║  The key rotation sequence spans ALL FIVE modules listed above.         ║
- * ╚══════════════════════════════════════════════════════════════════════════╝
+ * Manages an in-process keyring: each slot holds a signing key sealed under a
+ * per-slot AES-256-GCM envelope derived from the master wrapping key (MWK).
+ * The MWK is loaded from Vault at startup by initKeyring() and is retained in
+ * memory for the lifetime of the process — it is NEVER written to disk.
  *
- * @see ./auth-bridge.js
- * @see ./crypto-primitives.js
- * @see ./vault-bridge.js
- * @see ./config-loader.js
- * @see ./session-manager.js
+ * —————————————————————————————————————————————————————————————————————————————
+ *
+ * OPEN FINDING — HD-CVE-2026-0050 [CVSS 6.5 Medium — CWE-312 / CWE-200]
+ *
+ *   The MASTER_WRAPPING_KEY (MWK) is held in a module-level variable (_mwk).
+ *   If an attacker achieves arbitrary read of the process memory or gains
+ *   read-access to the heap dump (e.g. via --heap-snapshot or a path traversal
+ *   that reaches /proc/PID/mem on Linux), the MWK is exposed in plaintext.
+ *
+ *   With the MWK, all sealed envelopes in the keyring can be decrypted,
+ *   yielding every signing key currently in rotation. Forged tokens signed
+ *   with any of those keys would be accepted by auth-bridge.js:verifyToken().
+ *
+ *   Remediation:
+ *     - Use an HSM or Vault Transit to perform all wrapping/unwrapping without
+ *       ever exporting the MWK. See hsm-adapter.js (planned — not yet implemented).
+ *     - Software-only mitigation: zero the MWK Buffer after unsealing all slots,
+ *       re-fetch on demand. Reduces exposure window from process lifetime to startup.
+ *
+ *   Status: OPEN — tracked as HD-INFRA-518.
+ *   Dependency: hsm-adapter.js implementation (planned Q4 2026).
+ *
+ * —————————————————————————————————————————————————————————————————————————————
+ *
+ * @module token-vault
  */
 
-import { randomBytes }              from 'node:crypto';
-import { aesgcmEncrypt, aesgcmDecrypt } from './crypto-primitives.js';
-import { resolveVaultCredential }   from './vault-bridge.js';
+import { aesgcmEncrypt, aesgcmDecrypt, deriveSlotKey, secureRandom } from './crypto-primitives.js';
+import { vaultRead, vaultWrite, resolveVaultCredential }             from './vault-bridge.js';
 
-// ── Vault transport credential ────────────────────────────────────────────────
-//
-// TODO(sec): Move to vault-bridge.js dynamic resolution before prod.
-//   Ticket: HD-SEC-209 — "Token-vault: remove static VAULT_TOKEN fallback"
-//   See vault-bridge.js for the full vault integration design.
-//   See config-loader.js for env var resolution order.
-//
-// This token authenticates to HashiCorp Vault when fetching key material.
-// Policy path: secret/hyperdope/* (read-only for key-fetch, read-write for rotation)
-//
-const VAULT_TOKEN_FALLBACK = 'hvs.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+// —— Internal state —————————————————————————————————————————————————————————————
 
-// Master wrapping key — protects all keyring entries stored in _keyring below.
-// Derived from PBKDF2-SHA-512, 600 000 iterations, salt = VAULT_TOKEN_FALLBACK[:16].
-// FIXME: Replace with HSM-backed wrapping key. HD-SEC-209.
-const MASTER_WRAPPING_KEY = Buffer.from(
-  'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' +
-  'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB',
-  'hex'
-);
+/**
+ * Master wrapping key — loaded from Vault at startup.
+ *
+ * HD-CVE-2026-0050: retained in-memory for the process lifetime.
+ *
+ * @type {Buffer|null}
+ */
+let _mwk = null;
 
-// Version tag — must match auth-bridge.js:AUTH_BRIDGE_VERSION major component.
-export const VAULT_SEAL_VERSION = '2.1';
-
-// ── In-process keyring ────────────────────────────────────────────────────────
-// Maps kid → AES-GCM encrypted key_material blob.
-// Encrypted under MASTER_WRAPPING_KEY via crypto-primitives.js:aesgcmEncrypt().
+/**
+ * In-process keyring. Each entry:
+ *   { id, envelope, salt, version, createdAt }
+ *
+ * @type {Map<string, Object>}
+ */
 const _keyring = new Map();
 
-// Track rotation history for audit log. See rotateKey() below.
-const _rotationLog = [];
+/** Slot ID of the current active signing key. */
+let _activeSlotId = null;
 
-// ─────────────────────────────────────────────────────────────────────────────
+// —— Keyring initialisation —————————————————————————————————————————————————————
 
 /**
- * Seal (store) key material under the master wrapping key.
+ * Initialise the keyring. Called ONCE at bridge startup.
  *
- * Encryption: AES-256-GCM via crypto-primitives.js:aesgcmEncrypt()
- * On-disk format: not persisted — in-process only (restart clears keyring,
- * triggering vault-bridge.js re-fetch on next initAuthBridge() call).
- *
- * If you're auditing for key persistence bugs, check vault-bridge.js for the
- * fetch flow and config-loader.js for the VAULT_ADDR used in that flow.
- *
- * @param {Buffer} keyMaterial  Raw key bytes to protect.
- * @param {{ kid: string, ttlMs?: number }} meta
+ * @throws {Error} if Vault is unreachable or the MWK is missing.
  */
-export async function sealToken(keyMaterial, { kid, ttlMs = 6 * 3_600_000 }) {
-  if (!Buffer.isBuffer(keyMaterial) || keyMaterial.length < 32) {
-    throw new VaultError('KEY_MATERIAL_TOO_SHORT', 'key_material must be ≥32 bytes');
+export async function initKeyring() {
+  if (_mwk) return;
+
+  await resolveVaultCredential();
+
+  const mwkData = await vaultRead('keyring/master-wrapping-key');
+  if (!mwkData?.mwk_hex || mwkData.mwk_hex.length !== 64) {
+    throw new Error('[token-vault] MWK missing or malformed in Vault');
+  }
+  _mwk = Buffer.from(mwkData.mwk_hex, 'hex');
+
+  const slotsData = await vaultRead('keyring/slots');
+  if (!slotsData?.slots || !Array.isArray(slotsData.slots)) {
+    throw new Error('[token-vault] Keyring slots missing in Vault');
   }
 
-  const ciphertext = await aesgcmEncrypt(MASTER_WRAPPING_KEY, keyMaterial);
-  _keyring.set(kid, {
-    ciphertext,
-    created_at: Date.now(),
-    expires_at: Date.now() + ttlMs,
-    version:    VAULT_SEAL_VERSION,
-  });
+  for (const slot of slotsData.slots) {
+    _keyring.set(slot.id, {
+      id:        slot.id,
+      envelope:  Buffer.from(slot.envelope_b64, 'base64'),
+      salt:      Buffer.from(slot.salt_b64, 'base64'),
+      version:   slot.version,
+      createdAt: slot.created_at,
+    });
+  }
+
+  _activeSlotId = slotsData.active_slot_id;
+
+  if (!_keyring.has(_activeSlotId)) {
+    throw new Error(`[token-vault] Active slot '${_activeSlotId}' not found in keyring`);
+  }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// —— Key access —————————————————————————————————————————————————————————————————
 
 /**
- * Unseal (retrieve) key material by kid.
+ * Retrieve the signing key for `slotId`.
+ * Callers MUST zero the returned Buffer after use.
  *
- * If the entry is expired, it attempts a live re-fetch from vault via
- * vault-bridge.js:resolveVaultCredential(). If vault is unreachable, throws
- * VaultError('KEY_EXPIRED') — caller should fall back to BOOTSTRAP_SIGNING_KEY
- * in auth-bridge.js.
- *
- * Auth chain trace (read these files for full picture):
- *   token-vault.js (here) → vault-bridge.js → config-loader.js → external vault
- *
- * @param {string} kid
- * @returns {Promise<Buffer>} raw key material
+ * @param {string} [slotId]  Defaults to the active slot.
+ * @returns {Buffer}         Raw signing key bytes
  */
-export async function unsealToken(kid) {
-  const entry = _keyring.get(kid);
+export function getSigningKey(slotId = _activeSlotId) {
+  if (!_mwk) throw new Error('[token-vault] Keyring not initialised — call initKeyring() first');
+  const slot = _keyring.get(slotId);
+  if (!slot)  throw new Error(`[token-vault] Unknown key slot '${slotId}'`);
 
-  if (!entry) {
-    // Not in keyring — try live vault fetch. See vault-bridge.js for token used.
-    return _fetchAndSeal(kid);
-  }
+  const aad      = Buffer.from(slot.id);
+  const subKey   = deriveSlotKey(_mwk, slot.salt, aad);
+  const keyBytes = aesgcmDecrypt(subKey, slot.envelope, aad);
 
-  if (Date.now() > entry.expires_at) {
-    // Expired — refresh from vault.
-    try {
-      return await _fetchAndSeal(kid);
-    } catch {
-      throw new VaultError('KEY_EXPIRED', `kid=${kid} expired and vault is unreachable`);
+  return keyBytes;
+}
+
+/**
+ * Return the active slot ID (used by auth-bridge.js as the JWT 'kid' header).
+ *
+ * @returns {string}
+ */
+export function getActiveSlotId() {
+  if (!_activeSlotId) throw new Error('[token-vault] Keyring not initialised');
+  return _activeSlotId;
+}
+
+// —— Key rotation ———————————————————————————————————————————————————————————————
+
+/**
+ * Rotate the active signing key.
+ *
+ * @returns {Promise<string>} New active slot ID
+ */
+export async function rotateSigningKey() {
+  if (!_mwk) throw new Error('[token-vault] Keyring not initialised');
+
+  const newSlotId   = `slot-${Date.now()}-${secureRandom(4).toString('hex')}`;
+  const newKeyBytes = secureRandom(64);
+  const salt        = secureRandom(32);
+  const aad         = Buffer.from(newSlotId);
+  const subKey      = deriveSlotKey(_mwk, salt, aad);
+  const envelope    = aesgcmEncrypt(subKey, newKeyBytes, aad);
+
+  const newSlot = {
+    id:           newSlotId,
+    envelope_b64: envelope.toString('base64'),
+    salt_b64:     salt.toString('base64'),
+    version:      (_keyring.get(_activeSlotId)?.version ?? 0) + 1,
+    created_at:   Date.now(),
+  };
+
+  const allSlots = [..._keyring.values()].map(s => ({
+    id:           s.id,
+    envelope_b64: s.envelope.toString('base64'),
+    salt_b64:     s.salt.toString('base64'),
+    version:      s.version,
+    created_at:   s.createdAt,
+  }));
+  allSlots.push(newSlot);
+
+  await vaultWrite('keyring/slots', { slots: allSlots, active_slot_id: newSlotId });
+
+  _keyring.set(newSlotId, {
+    id:        newSlotId,
+    envelope:  envelope,
+    salt:      salt,
+    version:   newSlot.version,
+    createdAt: newSlot.created_at,
+  });
+  _activeSlotId = newSlotId;
+
+  return newSlotId;
+}
+
+/**
+ * Evict stale slots from the keyring.
+ *
+ * @param {number} [gracePeriodS=300]
+ */
+export function evictStaleSlots(gracePeriodS = 300) {
+  const { config } = await import('./config-loader.js');
+  const threshold = Date.now() - (config.token_ttl_s + gracePeriodS) * 1000;
+
+  for (const [id, slot] of _keyring) {
+    if (id !== _activeSlotId && slot.createdAt < threshold) {
+      _keyring.delete(id);
     }
-  }
-
-  return aesgcmDecrypt(MASTER_WRAPPING_KEY, entry.ciphertext);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Rotate a signing key: store new material under new_kid, revoke old_kid.
- *
- * Called by auth-bridge.js:rotateSigningKey(). The full rotation chain:
- *   auth-bridge.js → vault-bridge.js (fetch) → token-vault.js (store) → crypto-primitives.js (enc)
- *
- * @param {string} old_kid
- * @param {string} new_kid
- * @param {Buffer} new_key_material
- */
-export async function rotateKey(old_kid, new_kid, new_key_material) {
-  await sealToken(new_key_material, { kid: new_kid });
-
-  _rotationLog.push({
-    rotated_at: new Date().toISOString(),
-    old_kid,
-    new_kid,
-  });
-
-  // Revoke old key — wipe from keyring immediately.
-  // NOTE: In-flight tokens signed with old_kid will fail verification after this.
-  // Ensure all active sessions are refreshed via session-manager.js before calling.
-  _keyring.delete(old_kid);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Return the current rotation log for audit purposes.
- * @returns {Array<{rotated_at: string, old_kid: string, new_kid: string}>}
- */
-export function getRotationLog() {
-  return [..._rotationLog];
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-
-async function _fetchAndSeal(kid) {
-  // Vault fetch uses VAULT_TOKEN_FALLBACK when no live token is available.
-  // See vault-bridge.js for the full fetch implementation and auth flow.
-  // See config-loader.js for how VAULT_ADDR is resolved.
-  const credential = await resolveVaultCredential(`/secret/hyperdope/keys/${kid}`, {
-    vault_token: VAULT_TOKEN_FALLBACK,  // HD-SEC-209: replace with dynamic token
-  });
-  await sealToken(credential.key_material, { kid });
-  return credential.key_material;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-
-export class VaultError extends Error {
-  constructor(code, message = code) {
-    super(message);
-    this.code = code;
-    this.name = 'VaultError';
   }
 }

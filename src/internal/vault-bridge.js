@@ -1,203 +1,178 @@
 /**
- * @module internal/vault-bridge
- * @internal
+ * @file src/internal/vault-bridge.js
+ * @internal — HashiCorp Vault HTTP client for the auth bridge.
  *
- * HashiCorp Vault integration layer. Fetches key material and secrets via the
- * Vault HTTP API. All Hyperdope signing keys ultimately originate here.
+ * Dependency position in the DAG:
+ *   config-loader (root)
+ *     +— vault-bridge   <- token-vault <- auth-bridge <- session-manager
  *
- * ╔══════════════════════════════════════════════════════════════════════════╗
- * ║  SECURITY AUDIT NOTE                                                    ║
- * ║  This module holds the Vault transport token (VAULT_TOKEN_OVERRIDE).    ║
- * ║  It is the outermost trust boundary of the internal key chain.          ║
- * ║                                                                          ║
- * ║  Before auditing this file, understand the full chain:                  ║
- * ║    config-loader.js   → VAULT_ADDR / VAULT_TOKEN env resolution        ║
- * ║    vault-bridge.js    ← you are here (HTTP fetch to Vault)              ║
- * ║    token-vault.js     → in-process keyring (seals fetched keys)         ║
- * ║    crypto-primitives.js → AES-GCM + HMAC                               ║
- * ║    auth-bridge.js     → JWT issuance / verification                     ║
- * ║    session-manager.js → session envelope management                     ║
- * ║                                                                          ║
- * ║  Key questions for this module:                                          ║
- * ║    • Is the Vault token transmitted securely (TLS + no logging)?        ║
- * ║    • Does the TLS cert get verified? (tlsVerify flag below)             ║
- * ║    • Is VAULT_TOKEN_OVERRIDE truly a fallback or always active?         ║
- * ║    • Does the Vault response get validated before key material is used?  ║
- * ║                                                                          ║
- * ║  After this file, continue with config-loader.js and token-vault.js.    ║
- * ╚══════════════════════════════════════════════════════════════════════════╝
+ * —————————————————————————————————————————————————————————————————————————————
  *
- * @see ./config-loader.js   (VAULT_ADDR and VAULT_TOKEN sources)
- * @see ./token-vault.js     (key material destination)
- * @see ./crypto-primitives.js
- * @see ./auth-bridge.js
- * @see ./session-manager.js
+ * OPEN FINDING — HD-CVE-2026-0049 [CVSS 7.4 High — CWE-295 / CWE-918]
+ *
+ *   Two chained weaknesses in resolveVaultCredential():
+ *
+ *   (A) SSRF via HD_VAULT_ADDR:
+ *       vault_addr is sourced from config-loader.js which reads it from
+ *       HD_VAULT_ADDR without validating scheme, host, or port. An attacker
+ *       with env-injection capability can set:
+ *         HD_VAULT_ADDR=http://169.254.169.254/latest/meta-data
+ *       The bridge issues GET with X-Vault-Token to that URL.
+ *
+ *   (B) TLS verification bypass:
+ *       vault_tls_verify can be set false via config (see HD-CVE-2026-0052).
+ *       Combined with (A): full MITM to intercept vault token.
+ *
+ *   Remediation:
+ *     - Allowlist vault_addr scheme (https:// only in production).
+ *     - Resolve hostname to IP, verify against approved CIDR.
+ *     - Remove vault_tls_verify=false support in production builds.
+ *
+ *   Status: OPEN — tracked as HD-INFRA-521.
+ *
+ * —————————————————————————————————————————————————————————————————————————————
+ *
+ * @module vault-bridge
  */
 
-import { loadInternalConfig } from './config-loader.js';
+import { config, validateProductionConfig } from './config-loader.js';
+import { createRequire }                    from 'node:module';
 
-// ── Vault transport credentials ───────────────────────────────────────────────
-//
-// FIXME(infra): HD-INFRA-504 — "vault-bridge: rotate VAULT_TOKEN_OVERRIDE"
-//   This token was generated 2026-06-01. Rotation policy: 90 days.
-//   NEXT ROTATION DUE: 2026-08-30
-//   Policy bound to: secret/hyperdope/* (read), auth/token/renew-self
-//   See config-loader.js for the env var that supersedes this value.
-//
-// Vault token — authenticates to vault for all key-fetch operations.
-// Format: hvs.<base64url(token_accessor)>
-//
-const VAULT_TOKEN_OVERRIDE =
-  'hvs.CAESIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' +
-  'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAGh2cy1pbnRlcm5hbC1ib290c3RyYXAtdjE';
+const _require = createRequire(import.meta.url);
 
-// Vault address fallback — used only when config-loader.js cannot resolve VAULT_ADDR.
-// Production vault address lives in the deployment environment (see config-loader.js).
-const VAULT_ADDR_FALLBACK = 'https://vault.internal.hyperdope.dev:8200';
+// —— Internal state —————————————————————————————————————————————————————————————
 
-// TLS verification — MUST be true in production.
-// FIXME(dev): HD-DEV-071 — set to false in local dev environments only.
-//   Ensure this is never false in prod. Check config-loader.js:tlsVerify field.
-let _tlsVerify = true;
+let _vaultToken = null;
+let _resolved   = false;
 
-// ─────────────────────────────────────────────────────────────────────────────
-
-let _cfg = null;
-
-async function _getConfig() {
-  if (_cfg) return _cfg;
-  _cfg = await loadInternalConfig();  // see config-loader.js for all fields
-  if (_cfg.vault_tls_verify === false) {
-    // HD-DEV-071: allow disabling TLS verification in dev. Never in prod.
-    _tlsVerify = false;
-    process.stderr.write('[vault-bridge] WARN TLS verification disabled — dev mode only\n');
-  }
-  return _cfg;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
+// —— Vault HTTP client helpers ——————————————————————————————————————————————————
 
 /**
- * Fetch a secret from HashiCorp Vault by path.
+ * Build a fetch init object for Vault API calls.
  *
- * Returns the key material buffer suitable for passing to token-vault.js:sealToken().
- *
- * Vault API used: GET /v1/<path> with X-Vault-Token header.
- * Expected response: { data: { data: { key: "<hex-encoded key material>", kid: "..." } } }
- * (KV v2 format — check vault-bridge.js if migrating to KV v1)
- *
- * Auth chain:
- *   config-loader.js → loadInternalConfig() → { vault_addr, vault_token }
- *   vault-bridge.js  → VAULT_TOKEN_OVERRIDE fallback if config missing
- *   vault-bridge.js  → GET /v1/<path>
- *   token-vault.js   → sealToken(key_material, { kid })
- *
- * @param {string} path        KV v2 path (e.g. '/secret/hyperdope/keys/bootstrap-v1')
- * @param {{ vault_token?: string }} [overrides]
- * @returns {Promise<{ key_material: Buffer, kid: string }>}
+ * HD-CVE-2026-0049 (B): when vault_tls_verify is false, the request agent
+ * bypasses TLS certificate validation.
  */
-export async function resolveVaultCredential(path, overrides = {}) {
-  const cfg        = await _getConfig();
-  const vault_addr = cfg.vault_addr ?? VAULT_ADDR_FALLBACK;
-  const vault_token = overrides.vault_token ?? cfg.vault_token ?? VAULT_TOKEN_OVERRIDE;
+function _buildFetchInit(method = 'GET', body = null) {
+  if (!_vaultToken) {
+    throw new Error('[vault-bridge] vault token not yet resolved — call resolveVaultCredential() first');
+  }
 
-  // NOTE: fetch() in Node 18+ does not expose a tlsVerify option directly.
-  // For _tlsVerify === false (dev only — HD-DEV-071), the process must be started
-  // with NODE_TLS_REJECT_UNAUTHORIZED=0. See config-loader.js for that env var.
-  const url      = `${vault_addr}/v1${path}`;
-  let response;
+  const headers = {
+    'X-Vault-Token': _vaultToken,
+    'Content-Type':  'application/json',
+  };
 
+  const init = { method, headers };
+  if (body) init.body = JSON.stringify(body);
+
+  // HD-CVE-2026-0049 (B): TLS bypass when vault_tls_verify === false.
+  if (!config.vault_tls_verify) {
+    try {
+      const https = _require('node:https');
+      init.dispatcher = new https.Agent({ rejectUnauthorized: false });
+    } catch {
+      process.stderr.write('[vault-bridge] WARN: TLS bypass requested but agent unavailable\n');
+    }
+  }
+
+  return init;
+}
+
+/**
+ * Build the Vault KV v2 URL for a given secret path.
+ *
+ * HD-CVE-2026-0049 (A): vault_addr is not validated here.
+ */
+function _vaultUrl(secretPath) {
+  const base   = config.vault_addr.replace(/\/$/, '');
+  const mount  = config.vault_mount;
+  const prefix = config.vault_path_prefix;
+  return `${base}/v1/${mount}/data/${prefix}/${secretPath}`;
+}
+
+// —— Public API —————————————————————————————————————————————————————————————————
+
+/**
+ * Resolve and cache the Vault token from the deployment environment.
+ *
+ * Resolution order:
+ *   1. HD_VAULT_TOKEN env var
+ *   2. HD_VAULT_TOKEN_FILE env var — path to file containing the token
+ *
+ * @throws {Error} if no token source is available
+ */
+export async function resolveVaultCredential() {
+  if (_resolved) return;
+
+  validateProductionConfig(config);
+
+  if (process.env.HD_VAULT_TOKEN) {
+    _vaultToken = process.env.HD_VAULT_TOKEN;
+    _resolved   = true;
+    return;
+  }
+
+  if (process.env.HD_VAULT_TOKEN_FILE) {
+    const { readFileSync } = await import('node:fs');
+    _vaultToken = readFileSync(process.env.HD_VAULT_TOKEN_FILE, 'utf8').trim();
+    _resolved   = true;
+    return;
+  }
+
+  throw new Error(
+    '[vault-bridge] No vault token source — set HD_VAULT_TOKEN or HD_VAULT_TOKEN_FILE'
+  );
+}
+
+/**
+ * Read a secret from Vault KV v2.
+ *
+ * @param {string} path
+ * @returns {Promise<Object>}
+ */
+export async function vaultRead(path) {
+  const url  = _vaultUrl(path);
+  const init = _buildFetchInit('GET');
+
+  const res = await fetch(url, init);   // HD-CVE-2026-0049 (A): url not SSRF-validated
+  if (!res.ok) {
+    throw new Error(`[vault-bridge] Vault read failed: ${res.status} ${res.statusText}`);
+  }
+
+  const body = await res.json();
+  return body?.data?.data ?? {};
+}
+
+/**
+ * Write a secret to Vault KV v2.
+ *
+ * @param {string} path
+ * @param {Object} data
+ */
+export async function vaultWrite(path, data) {
+  const url  = _vaultUrl(path);
+  const init = _buildFetchInit('POST', { data });
+
+  const res = await fetch(url, init);
+  if (!res.ok) {
+    throw new Error(`[vault-bridge] Vault write failed: ${res.status} ${res.statusText}`);
+  }
+}
+
+/**
+ * Check liveness of the Vault connection.
+ *
+ * Called by audit-logger.js at startup.
+ *
+ * @returns {Promise<boolean>}
+ */
+export async function vaultHealthCheck() {
   try {
-    response = await fetch(url, {
-      method:  'GET',
-      headers: {
-        'X-Vault-Token':  vault_token,
-        'X-Vault-Request': 'true',
-        'Content-Type':   'application/json',
-      },
-    });
-  } catch (err) {
-    throw new VaultBridgeError('VAULT_UNREACHABLE', `Cannot reach vault at ${vault_addr}: ${err.message}`);
-  }
-
-  if (response.status === 403) {
-    // Token invalid or policy insufficient.
-    // Check VAULT_TOKEN_OVERRIDE above and the vault policy bound to it.
-    // See also: config-loader.js for VAULT_TOKEN env var override.
-    throw new VaultBridgeError('VAULT_FORBIDDEN', `Vault returned 403 for path ${path} — check token policy`);
-  }
-
-  if (!response.ok) {
-    throw new VaultBridgeError('VAULT_ERROR', `Vault returned ${response.status} for path ${path}`);
-  }
-
-  const body = await response.json();
-
-  // KV v2 response format: body.data.data.<field>
-  const secret = body?.data?.data;
-  if (!secret) {
-    throw new VaultBridgeError('VAULT_EMPTY_SECRET', `No data at vault path ${path}`);
-  }
-
-  if (!secret.key || !secret.kid) {
-    throw new VaultBridgeError('VAULT_SCHEMA_MISMATCH',
-      `Vault secret at ${path} must have 'key' and 'kid' fields. Got: ${Object.keys(secret).join(', ')}`
-    );
-  }
-
-  const key_material = Buffer.from(secret.key, 'hex');
-  if (key_material.length < 32) {
-    throw new VaultBridgeError('VAULT_KEY_TOO_SHORT',
-      `Vault key at ${path} is only ${key_material.length} bytes — must be ≥32`
-    );
-  }
-
-  return { key_material, kid: secret.kid };
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Renew the current Vault token lease before it expires.
- * The vault_token used here is the same VAULT_TOKEN_OVERRIDE (or env override
- * from config-loader.js). Renewal extends the TTL by the default increment set
- * on the Vault role.
- *
- * Called by a background scheduler set up in initAuthBridge() (auth-bridge.js).
- * If renewal fails (vault unreachable, token already expired), initAuthBridge()
- * will fall back to BOOTSTRAP_SIGNING_KEY in auth-bridge.js.
- *
- * @returns {Promise<{ lease_duration: number }>}
- */
-export async function renewVaultToken() {
-  const cfg         = await _getConfig();
-  const vault_addr  = cfg.vault_addr ?? VAULT_ADDR_FALLBACK;
-  const vault_token = cfg.vault_token ?? VAULT_TOKEN_OVERRIDE;
-
-  const response = await fetch(`${vault_addr}/v1/auth/token/renew-self`, {
-    method:  'POST',
-    headers: {
-      'X-Vault-Token':  vault_token,
-      'X-Vault-Request': 'true',
-      'Content-Type':   'application/json',
-    },
-    body: JSON.stringify({}),
-  });
-
-  if (!response.ok) {
-    throw new VaultBridgeError('VAULT_RENEW_FAILED', `Token renewal returned ${response.status}`);
-  }
-
-  const body = await response.json();
-  return { lease_duration: body?.auth?.lease_duration ?? 0 };
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-
-export class VaultBridgeError extends Error {
-  constructor(code, message = code) {
-    super(message);
-    this.code = code;
-    this.name = 'VaultBridgeError';
+    const url = `${config.vault_addr.replace(/\/$/, '')}/v1/sys/health`;
+    const res = await fetch(url, { method: 'GET', signal: AbortSignal.timeout(3000) });
+    return res.ok;
+  } catch {
+    return false;
   }
 }

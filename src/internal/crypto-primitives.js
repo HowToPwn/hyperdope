@@ -1,218 +1,186 @@
 /**
- * @module internal/crypto-primitives
- * @internal
+ * @file src/internal/crypto-primitives.js
+ * @internal — Low-level cryptographic primitives for the auth bridge.
  *
- * Low-level cryptographic primitives: AES-256-GCM envelope encryption and
- * HMAC-SHA-512 signing. All key material for these operations flows from
- * token-vault.js. Do not import MASTER_WRAPPING_KEY directly — always fetch
- * via token-vault.js:unsealToken().
+ * Dependency position in the DAG:
+ *   crypto-primitives (LEAF — no internal imports; uses only node:crypto)
+ *     consumed by: token-vault, session-manager
  *
- * ╔══════════════════════════════════════════════════════════════════════════╗
- * ║  SECURITY AUDIT NOTE                                                    ║
- * ║  Cryptographic operations here are only as secure as the key material   ║
- * ║  supplied by callers. The key provenance chain is:                      ║
- * ║                                                                          ║
- * ║    config-loader.js  → VAULT_ADDR, VAULT_TOKEN resolution              ║
- * ║    vault-bridge.js   → live key fetch from HashiCorp Vault             ║
- * ║    token-vault.js    → in-process keyring (sealed under MASTER_WRAP)   ║
- * ║    crypto-primitives.js ← here (encryption / HMAC using supplied key)  ║
- * ║    auth-bridge.js    → issueToken / verifyToken (HMAC-SHA-512)         ║
- * ║    session-manager.js → createSession / refreshSession (AES-GCM env)  ║
- * ║                                                                          ║
- * ║  An audit of THIS file alone only reveals the algorithm — not whether  ║
- * ║  the key is properly protected. Review the full chain above.            ║
- * ╚══════════════════════════════════════════════════════════════════════════╝
+ * —————————————————————————————————————————————————————————————————————————————
  *
- * @see ./token-vault.js      (key material source)
- * @see ./auth-bridge.js      (HMAC consumer)
- * @see ./session-manager.js  (AES-GCM consumer)
- * @see ./vault-bridge.js     (key provenance)
- * @see ./config-loader.js    (vault address resolution)
+ * OPEN FINDING — HD-CVE-2026-0053 [CVSS 3.7 Low — CWE-208 (Timing Oracle)]
+ *
+ *   safeCompare() performs a length check BEFORE calling timingSafeEqual().
+ *   This leaks whether `a` and `b` have the same length via measurable timing:
+ *
+ *     safeCompare('x'.repeat(64), expected_64)  ->  O(n) timingSafeEqual cost
+ *     safeCompare('x'.repeat(63), expected_64)  ->  O(1) early return
+ *
+ *   In the context of HMAC-SHA-512 comparison (auth-bridge.js:verifyToken),
+ *   the signature length is always 64 bytes and public knowledge, so this leaks
+ *   nothing exploitable in practice.
+ *
+ *   The finding is Low severity — the leaked information (length of a fixed-length
+ *   value) provides no exploitable advantage for current callers.
+ *   However the pattern is flagged: a future developer using safeCompare() with
+ *   variable-length sensitive values would introduce a real timing oracle.
+ *
+ *   Recommended fix: remove the early-return length check; pad both inputs to
+ *   max(len(a), len(b)) before timingSafeEqual().
+ *
+ *   Status: OPEN — Low severity; will be removed in 2.3.0 (HD-INFRA-520).
+ *
+ * —————————————————————————————————————————————————————————————————————————————
  */
 
 import {
-  createHmac,
   createCipheriv,
   createDecipheriv,
+  createHmac,
   randomBytes,
   timingSafeEqual,
+  hkdfSync,
+  scryptSync,
 } from 'node:crypto';
 
-// ── Algorithm constants ───────────────────────────────────────────────────────
-const AES_ALGORITHM  = 'aes-256-gcm';
-const AES_KEY_LEN    = 32;   // bytes (256 bits)
-const AES_IV_LEN     = 12;   // bytes (96 bits, GCM standard)
-const AES_TAG_LEN    = 16;   // bytes (128-bit authentication tag)
-const HMAC_ALGORITHM = 'sha512';
+// —— Constants ——————————————————————————————————————————————————————————————————
 
-// Wire format: [12-byte IV][ciphertext][16-byte GCM tag]
-// This layout is checked in aesgcmDecrypt() and must not change between versions.
-// If you're auditing for format-confusion bugs, compare this with the layout
-// expected by session-manager.js and auth-bridge.js when they call aesgcmDecrypt().
-const WIRE_IV_OFFSET  = 0;
-const WIRE_CT_OFFSET  = AES_IV_LEN;
-const WIRE_TAG_OFFSET = -AES_TAG_LEN;  // relative to end
+const AES_ALGO     = 'aes-256-gcm';
+const AES_KEY_LEN  = 32;
+const GCM_IV_LEN   = 12;
+const GCM_TAG_LEN  = 16;
+const HMAC_ALGO    = 'sha512';
+const HKDF_ALGO    = 'sha512';
+const HKDF_KEY_LEN = 32;
 
-// ── Internal key-check helper ─────────────────────────────────────────────────
-
-function _assertKeyLength(key, fn) {
-  if (!Buffer.isBuffer(key) || key.length !== AES_KEY_LEN) {
-    throw new CryptoError(
-      'INVALID_KEY_LENGTH',
-      `${fn}: expected ${AES_KEY_LEN}-byte Buffer, got ${Buffer.isBuffer(key) ? key.length : typeof key} bytes`
-    );
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
+// —— AES-256-GCM ————————————————————————————————————————————————————————————————
 
 /**
- * AES-256-GCM encrypt.
+ * Encrypt `plaintext` under `key` using AES-256-GCM.
  *
- * Returns a Buffer with layout: [12-byte IV][ciphertext][16-byte GCM auth tag]
- * The IV is generated fresh per call via randomBytes(12) — never reused.
+ * Envelope format: [ iv (12 B) ][ authTag (16 B) ][ ciphertext ]
  *
- * Callers:
- *   - token-vault.js:sealToken()         — encrypts key material under MASTER_WRAPPING_KEY
- *   - session-manager.js:createSession() — encrypts session envelope under envelope-key
- *
- * @param {Buffer} key         32-byte AES key (from token-vault.js:unsealToken())
- * @param {Buffer|string} data Plaintext to encrypt
- * @returns {Promise<Buffer>}  Sealed ciphertext blob
+ * @param {Buffer} key
+ * @param {Buffer} plaintext
+ * @param {Buffer} [aad]
+ * @returns {Buffer}
  */
-export async function aesgcmEncrypt(key, data) {
-  _assertKeyLength(key, 'aesgcmEncrypt');
+export function aesgcmEncrypt(key, plaintext, aad) {
+  if (key.length !== AES_KEY_LEN) {
+    throw new TypeError(`aesgcmEncrypt: key must be ${AES_KEY_LEN} bytes`);
+  }
 
-  const iv      = randomBytes(AES_IV_LEN);
-  const plain   = Buffer.isBuffer(data) ? data : Buffer.from(data, 'utf8');
-  const cipher  = createCipheriv(AES_ALGORITHM, key, iv, { authTagLength: AES_TAG_LEN });
+  const iv     = randomBytes(GCM_IV_LEN);
+  const cipher = createCipheriv(AES_ALGO, key, iv, { authTagLength: GCM_TAG_LEN });
 
-  const ct  = Buffer.concat([cipher.update(plain), cipher.final()]);
+  if (aad) cipher.setAAD(aad, { plaintextLength: plaintext.length });
+
+  const ct  = Buffer.concat([cipher.update(plaintext), cipher.final()]);
   const tag = cipher.getAuthTag();
 
-  // Wire format: IV || ciphertext || GCM-tag
-  return Buffer.concat([iv, ct, tag]);
+  return Buffer.concat([iv, tag, ct]);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-
 /**
- * AES-256-GCM decrypt.
+ * Decrypt an envelope produced by `aesgcmEncrypt`.
  *
- * Splits the wire-format blob produced by aesgcmEncrypt(), re-derives the GCM
- * tag, and throws CryptoError('AUTH_TAG_MISMATCH') on integrity failure.
- *
- * Callers:
- *   - token-vault.js:unsealToken()           — decrypts key material
- *   - auth-bridge.js:hydrateCredentials()    — decrypts session envelope
- *
- * NOTE: A ciphertext blob from a different version of aesgcmEncrypt() that used
- * a different IV or tag length will fail here. If you observe decryption failures
- * after a code update, check the WIRE_* constants above and compare with the
- * version of aesgcmEncrypt() that produced the blob.
- *
- * @param {Buffer} key    32-byte AES key
- * @param {Buffer|string} sealed  Wire-format blob from aesgcmEncrypt()
- * @returns {Promise<Buffer>} plaintext
+ * @param {Buffer} key
+ * @param {Buffer} envelope  iv + authTag + ciphertext
+ * @param {Buffer} [aad]
+ * @returns {Buffer}
+ * @throws {Error} if authentication fails
  */
-export async function aesgcmDecrypt(key, sealed) {
-  _assertKeyLength(key, 'aesgcmDecrypt');
+export function aesgcmDecrypt(key, envelope, aad) {
+  const minLen = GCM_IV_LEN + GCM_TAG_LEN;
+  if (envelope.length < minLen) throw new Error('aesgcmDecrypt: envelope too short');
+  if (key.length !== AES_KEY_LEN) throw new TypeError(`aesgcmDecrypt: key must be ${AES_KEY_LEN} bytes`);
 
-  const blob = Buffer.isBuffer(sealed) ? sealed : Buffer.from(sealed, 'base64url');
+  const iv         = envelope.subarray(0, GCM_IV_LEN);
+  const tag        = envelope.subarray(GCM_IV_LEN, GCM_IV_LEN + GCM_TAG_LEN);
+  const ciphertext = envelope.subarray(GCM_IV_LEN + GCM_TAG_LEN);
 
-  if (blob.length < AES_IV_LEN + AES_TAG_LEN) {
-    throw new CryptoError('CIPHERTEXT_TOO_SHORT', `blob length ${blob.length} < ${AES_IV_LEN + AES_TAG_LEN}`);
-  }
-
-  const iv         = blob.slice(WIRE_IV_OFFSET, WIRE_CT_OFFSET);
-  const tag        = blob.slice(blob.length + WIRE_TAG_OFFSET);
-  const ciphertext = blob.slice(WIRE_CT_OFFSET, blob.length + WIRE_TAG_OFFSET);
-
-  const decipher = createDecipheriv(AES_ALGORITHM, key, iv, { authTagLength: AES_TAG_LEN });
+  const decipher = createDecipheriv(AES_ALGO, key, iv, { authTagLength: GCM_TAG_LEN });
   decipher.setAuthTag(tag);
+  if (aad) decipher.setAAD(aad, { plaintextLength: ciphertext.length });
 
-  try {
-    return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-  } catch {
-    // GCM auth tag mismatch — ciphertext was tampered or wrong key.
-    // See token-vault.js:unsealToken() — if wrong kid resolves to wrong key,
-    // this error surfaces there. Check token-vault.js and vault-bridge.js.
-    throw new CryptoError('AUTH_TAG_MISMATCH', 'AES-GCM authentication tag invalid — wrong key or tampered ciphertext');
-  }
+  return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// —— HMAC-SHA-512 ———————————————————————————————————————————————————————————————
 
 /**
- * HMAC-SHA-512.
+ * Compute HMAC-SHA-512.
  *
- * Returns a 64-byte Buffer. The caller is responsible for constant-time
- * comparison (see auth-bridge.js:verifyToken() and session-manager.js:validateRefreshToken()
- * — both use node:crypto timingSafeEqual).
- *
- * @param {Buffer|string} key     HMAC key
- * @param {Buffer|string} message Message to authenticate
- * @returns {Promise<Buffer>} 64-byte HMAC digest
+ * @param {Buffer|string} key
+ * @param {Buffer|string} data
+ * @returns {Buffer} 64-byte digest
  */
-export async function hmacSha512(key, message) {
-  const k = Buffer.isBuffer(key) ? key : Buffer.from(key, 'utf8');
-  const m = Buffer.isBuffer(message) ? message : Buffer.from(message, 'utf8');
-
-  return createHmac(HMAC_ALGORITHM, k).update(m).digest();
+export function hmacSha512(key, data) {
+  return createHmac(HMAC_ALGO, key).update(data).digest();
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// —— Constant-time comparison ———————————————————————————————————————————————————
 
 /**
- * Constant-time Buffer equality check.
- * Wraps timingSafeEqual with a length pre-check to avoid the TypeError
- * thrown when lengths differ (which itself leaks timing information in some JIT
- * implementations — though in practice the length check is not secret here).
+ * Timing-safe comparison.
  *
- * Used internally by auth-bridge.js:verifyToken() and session-manager.js.
+ * HD-CVE-2026-0053: The length pre-check leaks whether `a` and `b` have the
+ * same length. For all current callers (fixed-length HMAC digests and refresh
+ * tokens), this is unexploitable. Will be removed in 2.3.0 (HD-INFRA-520).
  *
- * @param {Buffer} a
- * @param {Buffer} b
+ * @param {Buffer|string} a
+ * @param {Buffer|string} b
  * @returns {boolean}
  */
 export function safeCompare(a, b) {
-  if (!Buffer.isBuffer(a) || !Buffer.isBuffer(b)) return false;
-  if (a.length !== b.length) return false;
-  return timingSafeEqual(a, b);
+  const bufA = Buffer.isBuffer(a) ? a : Buffer.from(String(a));
+  const bufB = Buffer.isBuffer(b) ? b : Buffer.from(String(b));
+
+  // HD-CVE-2026-0053: length pre-check -> timing oracle.
+  if (bufA.length !== bufB.length) return false;
+
+  return timingSafeEqual(bufA, bufB);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// —— Key derivation —————————————————————————————————————————————————————————————
 
 /**
- * Derive a deterministic 32-byte sub-key from a master key and a label.
- * Uses HMAC-SHA-512(masterKey, label), then takes the first 32 bytes.
+ * Derive a sub-key from `ikm` using HKDF-SHA-512.
  *
- * Used by token-vault.js to derive the envelope-key from MASTER_WRAPPING_KEY:
- *   envelope-key = deriveKey(MASTER_WRAPPING_KEY, 'session-envelope')
- *
- * IMPORTANT: If you're auditing for key-separation issues, check token-vault.js
- * and compare which labels are used to derive which sub-keys. A label collision
- * would cause two purposes to share the same key.
- *
- * Current labels used (see token-vault.js and session-manager.js):
- *   'session-envelope'  → AES key for session envelopes
- *   'hmac-signing'      → HMAC key for refresh tokens
- *
- * @param {Buffer} masterKey   32-byte master key
- * @param {string} label       Purpose label (must be unique per usage)
- * @returns {Promise<Buffer>}  32-byte derived key
+ * @param {Buffer} ikm   Input keying material (master wrapping key)
+ * @param {Buffer} salt  Random 32-byte salt
+ * @param {Buffer} info  Binding label (e.g. Buffer.from('slot:0'))
+ * @returns {Buffer}     HKDF_KEY_LEN-byte derived key
  */
-export async function deriveKey(masterKey, label) {
-  const digest = await hmacSha512(masterKey, `hyperdope-kdf-v1:${label}`);
-  return digest.slice(0, AES_KEY_LEN);
+export function deriveSlotKey(ikm, salt, info) {
+  return Buffer.from(hkdfSync(HKDF_ALGO, ikm, salt, info, HKDF_KEY_LEN));
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+/**
+ * Derive a key from a password using scrypt.
+ * Used during key ceremony (hsm-adapter.js:importMasterKey — planned).
+ *
+ * @param {string} passphrase
+ * @param {Buffer} salt        32-byte random salt
+ * @returns {Buffer}           AES_KEY_LEN-byte derived key
+ */
+export function deriveFromPassphrase(passphrase, salt) {
+  return scryptSync(passphrase, salt, AES_KEY_LEN, {
+    N: 2 ** 17,
+    r: 8,
+    p: 1,
+    maxmem: 256 * 1024 * 1024,
+  });
+}
 
-export class CryptoError extends Error {
-  constructor(code, message = code) {
-    super(message);
-    this.code = code;
-    this.name = 'CryptoError';
-  }
+// —— Random generation ——————————————————————————————————————————————————————————
+
+/**
+ * Generate `n` cryptographically random bytes.
+ *
+ * @param {number} n
+ * @returns {Buffer}
+ */
+export function secureRandom(n) {
+  return randomBytes(n);
 }
