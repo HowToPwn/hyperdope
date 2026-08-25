@@ -1,15 +1,19 @@
 {
   "name": "hyperdope",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "MCP server for adversarial security research — 6-phase pipeline from profile to disclosure",
   "type": "module",
   "bin": {
-    "hyperdope": "bin/hyperdope.js"
+    "hyperdope": "bin/hyperdope.js",
+    "hd-ci":     "bin/hd-ci.js",
+    "hd-run":    "bin/hd-run.js"
   },
   "scripts": {
     "start": "node bin/hyperdope.js",
-    "test": "node --test test/*.test.js",
-    "lint": "node --check bin/hyperdope.js src/server.js src/config.js src/session.js src/cvss.js src/retry.js src/context.js src/extract.js src/providers/index.js src/providers/claude.js src/providers/openai.js src/providers/gemini.js src/providers/ollama.js src/phases/index.js src/phases/profile.js src/phases/audit.js src/phases/confirm.js src/phases/assess.js src/phases/draft_ghsa.js src/phases/disclose.js src/phases/scan.js"
+    "ci":    "node bin/hd-ci.js",
+    "run":   "node bin/hd-run.js",
+    "test":  "node --test test/*.test.js",
+    "lint":  "node --check bin/hyperdope.js bin/hd-ci.js bin/hd-run.js src/server.js src/config.js src/session.js src/cvss.js src/retry.js src/context.js src/extract.js src/schema.js src/ci.js src/tui.js src/providers/index.js src/providers/claude.js src/providers/openai.js src/providers/gemini.js src/providers/ollama.js src/phases/index.js src/phases/profile.js src/phases/audit.js src/phases/confirm.js src/phases/assess.js src/phases/draft_ghsa.js src/phases/disclose.js src/phases/scan.js src/phases/verify.js"
   },
   "keywords": [
     "mcp",
@@ -21,6 +25,9 @@
     "ghsa",
     "osv",
     "disclosure",
+    "sarif",
+    "sbom",
+    "ci",
     "claude",
     "llm"
   ],
@@ -43,6 +50,9 @@
     "src/retry.js",
     "src/context.js",
     "src/extract.js",
+    "src/schema.js",
+    "src/ci.js",
+    "src/tui.js",
     "src/phases/",
     "src/providers/",
     "agent.example.yaml",
@@ -50,12 +60,12 @@
     "LICENSE.md"
   ],
   "dependencies": {
-    "@modelcontextprotocol/sdk": "latest",
-    "@anthropic-ai/sdk": "latest",
-    "openai": "latest",
-    "@google/generative-ai": "latest",
-    "js-yaml": "latest",
-    "zod": "latest"
+    "@modelcontextprotocol/sdk": "^1.12.3",
+    "@anthropic-ai/sdk":        "^0.54.0",
+    "openai":                   "^4.104.0",
+    "@google/generative-ai":    "^0.24.1",
+    "js-yaml":                  "^4.1.0",
+    "zod":                      "^3.25.67"
   },
   "engines": {
     "node": ">=20"

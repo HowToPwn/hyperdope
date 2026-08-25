@@ -48,7 +48,12 @@ function truncateHalf(str) {
 export function wrapDataBlock(label, content) {
   if (content === null || content === undefined || content === '') return '';
   const str = typeof content === 'string' ? content : JSON.stringify(content, null, 2);
-  return `<pipeline_data label="${label}">\n${str}\n</pipeline_data>`;
+  // Escape embedded closing tags so content cannot break out of the boundary.
+  // An attacker who controls prior-phase output (e.g. via a malicious repository
+  // that the LLM reflects) could otherwise inject "</pipeline_data>" to close the
+  // tag early and append instructions that run outside the data block.
+  const safe = str.replace(/<\/pipeline_data>/gi, '<\\/pipeline_data>');
+  return `<pipeline_data label="${label}">\n${safe}\n</pipeline_data>`;
 }
 
 export function trimContext(context, phaseKey) {
