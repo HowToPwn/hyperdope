@@ -127,6 +127,108 @@ SECURITY NOTE: This session may include content from prior pipeline phases or ca
   user_prefix: `Audit the following target using the 5-step adversarial methodology. Use all provided profile context.\n\nTarget: `,
 };
 
+// ── Programmatic chain candidate detection ────────────────────────────────────
+//
+// Works independently of the LLM — pairs findings by CWE class and severity
+// to identify chains that mechanically escalate impact.
+// This runs AFTER the LLM pass, so it catches chains the LLM missed or
+// was not confident enough to report.
+//
+// Known high-probability chains (grounded in 2024–2026 advisories):
+//
+//   PATH_TRAVERSAL + CMD_INJECTION   → path-traversal writes malicious config
+//                                       that injection reads as binary path → RCE
+//   PATH_TRAVERSAL + SECRETS        → path-traversal reads credential file → auth bypass
+//   SSRF             + METADATA      → SSRF reaches IMDS → cloud credential theft
+//   XSS              + CSRF          → stored XSS + privileged action → CSRF-assisted takeover
+//   AUTH_BYPASS      + IDOR          → bypass authz → access any tenant's data
+//   PROMPT_INJECTION + TOOL_ABUSE    → inject into LLM context → arbitrary tool calls
+//   PROTOTYPE_POLL   + SPAWN         → pollute Object.prototype.env → RCE via spawn
+
+const CHAIN_RULES = [
+  {
+    name: 'Path traversal + command injection → RCE',
+    classA: /path.traversal|directory.traversal|cwe-22|lfi|file.inclusion/i,
+    classB: /command.injection|code.execution|rce|exec|spawn|cwe-78|cwe-77/i,
+    combined_severity: 'critical',
+  },
+  {
+    name: 'Path traversal + hardcoded secret → credential theft',
+    classA: /path.traversal|directory.traversal|cwe-22/i,
+    classB: /secret|credential|hardcoded|cwe-798|api.key|token/i,
+    combined_severity: 'high',
+  },
+  {
+    name: 'SSRF + cloud metadata → privilege escalation',
+    classA: /ssrf|server.side.request|cwe-918|unvalidated.*url|fetch.*user/i,
+    classB: /metadata|imds|169\.254|cloud.*credential|aws.*key|gcp|azure/i,
+    combined_severity: 'critical',
+  },
+  {
+    name: 'Stored XSS + CSRF → account takeover',
+    classA: /xss|cross.site.scripting|stored.xss|cwe-79/i,
+    classB: /csrf|cross.site.request|cwe-352|missing.*token/i,
+    combined_severity: 'high',
+  },
+  {
+    name: 'Auth bypass + IDOR → cross-tenant data access',
+    classA: /auth.*bypass|broken.*access|cwe-284|missing.*auth|unauthenticated/i,
+    classB: /idor|insecure.*direct|object.*reference|tenant.*isolation|cwe-639/i,
+    combined_severity: 'critical',
+  },
+  {
+    name: 'Prompt injection + tool abuse → arbitrary tool execution',
+    classA: /prompt.injection|llm01|indirect.injection|rag|tool.result/i,
+    classB: /tool.abuse|excessive.agency|llm06|arbitrary.*tool|self.privesc/i,
+    combined_severity: 'critical',
+  },
+  {
+    name: 'Prototype pollution + spawn gadget → RCE',
+    classA: /prototype.pollution|cwe-1321|__proto__|constructor.*injection/i,
+    classB: /spawn|execfile|child.process|node.options|env.*gadget/i,
+    combined_severity: 'critical',
+  },
+  {
+    name: 'Dependency confusion + postinstall hook → supply chain RCE',
+    classA: /dependency.confusion|internal.package|confuse|squatt/i,
+    classB: /postinstall|hook|preinstall|supply.chain|lifecycle.script/i,
+    combined_severity: 'critical',
+  },
+];
+
+/**
+ * Given a list of audit findings, detect pairs that chain to higher severity.
+ * Returns an array of chain candidate objects supplementing those from the LLM.
+ *
+ * @param {{ id:string, title:string, vulnerability_class:string, cwe_id?:string,
+ *            description?:string, severity_estimate?:string }[]} findings
+ * @returns {{ finding_ids:string[], combined_impact:string, combined_severity:string,
+ *             detected_by:'programmatic' }[]}
+ */
+function detectChainCandidates(findings) {
+  const chains = [];
+  const stringify = f =>
+    `${f.vulnerability_class ?? ''} ${f.cwe_id ?? ''} ${f.title ?? ''} ${f.description?.slice(0, 200) ?? ''}`;
+
+  for (const rule of CHAIN_RULES) {
+    const aIds = findings.filter(f => rule.classA.test(stringify(f))).map(f => f.id);
+    const bIds = findings.filter(f => rule.classB.test(stringify(f))).map(f => f.id);
+    if (aIds.length === 0 || bIds.length === 0) continue;
+    // Avoid self-pairing
+    const uniqueBIds = bIds.filter(id => !aIds.includes(id));
+    if (uniqueBIds.length === 0) continue;
+    chains.push({
+      finding_ids:       [...aIds.slice(0, 2), ...uniqueBIds.slice(0, 2)],
+      combined_impact:   rule.name,
+      combined_severity: rule.combined_severity,
+      detected_by:       'programmatic',
+    });
+  }
+  return chains;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 export async function runAudit({ config, target, context, callProvider, phaseConfig }) {
   const system = phaseConfig?.system ?? BUILT_IN.system;
   const userPrefix = phaseConfig?.user_prefix ?? BUILT_IN.user_prefix;
@@ -139,19 +241,47 @@ export async function runAudit({ config, target, context, callProvider, phaseCon
 
   const raw = await callProvider(config, { system, user });
 
-  let findings = [];
+  let findings         = [];
+  let llmChains        = [];
+  let assumptionViolations = [];
+
   try {
-    const parsed = extractJson(raw);
-    findings = parsed?.findings ?? [];
+    const parsed         = extractJson(raw);
+    findings             = parsed?.findings          ?? [];
+    llmChains            = parsed?.chain_candidates  ?? [];
+    assumptionViolations = parsed?.assumption_violations ?? [];
   } catch {
-    // preserve raw
+    // preserve raw on extraction failure
+  }
+
+  // Programmatic chain detection on top of LLM output
+  const programmaticChains = detectChainCandidates(findings);
+
+  // Merge: LLM chains first, then programmatic chains for any rule not already covered
+  const coveredRuleNames = new Set(llmChains.map(c => c.combined_impact));
+  const newChains = programmaticChains.filter(c => !coveredRuleNames.has(c.combined_impact));
+  const allChains = [...llmChains, ...newChains];
+
+  // Annotate findings that participate in a critical chain with chain_elevation
+  const chainedFindingIds = new Set(
+    allChains
+      .filter(c => c.combined_severity === 'critical')
+      .flatMap(c => c.finding_ids),
+  );
+  for (const f of findings) {
+    if (chainedFindingIds.has(f.id)) {
+      const chain = allChains.find(c => c.finding_ids.includes(f.id));
+      f.chain_elevation = chain?.combined_impact ?? 'chains to critical';
+    }
   }
 
   return {
-    phase: 'audit',
-    status: findings.length > 0 ? 'complete' : 'partial',
+    phase:    'audit',
+    status:   findings.length > 0 ? 'complete' : 'partial',
     findings,
-    context: { ...(context ?? {}), audit: raw },
+    chains:   allChains,
+    assumption_violations: assumptionViolations,
+    context:  { ...(context ?? {}), audit: raw },
     raw,
   };
 }

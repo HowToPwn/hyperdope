@@ -36,6 +36,35 @@ export const HyperFindingSchema = z.object({
   poc:         z.string().optional(),
   status:      FindingStatus.default('open'),
   tags:        z.array(z.string()).default([]),
+
+  /**
+   * Evidence-quality confidence tier (1–5).
+   * Computed programmatically from observable evidence — not self-reported by LLM.
+   *
+   *   5 = CONFIRMED   — file path + line + PoC + CVSS verified + chain ≤ 3 hops
+   *   4 = HIGH        — 4 of 5 criteria met
+   *   3 = MEDIUM      — 3 of 5 criteria met
+   *   2 = LOW         — only 2 criteria met
+   *   1 = SPECULATIVE — pattern matched, chain unverified
+   */
+  confidence: z.number().int().min(1).max(5).optional(),
+
+  /**
+   * Blast radius context — populated by the scan phase for CVE findings.
+   * Gives downstream consumers a sense of how many deployments are at risk.
+   */
+  blast_radius: z.object({
+    monthly_downloads: z.number().optional(),
+    tier: z.enum(['massive', 'high', 'medium', 'low']).optional(),
+    source: z.string().optional(),    // 'npm' | 'pypi'
+  }).optional(),
+
+  /**
+   * Chain elevation note — set when this finding pairs with another to
+   * produce a higher-severity chain (e.g. path-traversal + config-write = RCE).
+   * Value is a human-readable description of the chain.
+   */
+  chain_elevation: z.string().optional(),
 });
 
 // ── Severity coercion ─────────────────────────────────────────────────────────
@@ -162,8 +191,68 @@ export function normalizeFinding(raw, phase, idx = 0) {
 /** Normalize all findings from a phase result into HyperFinding[] */
 export function normalizeFindings(findings, phase) {
   if (!Array.isArray(findings)) return [];
-  return findings.map((f, i) => normalizeFinding(f, phase, i));
+  return findings.map((f, i) => {
+    const normalized = normalizeFinding(f, phase, i);
+    // Attach computed confidence score and blast radius if present in raw finding
+    normalized.confidence   = computeConfidence({ ...f, ...normalized });
+    if (f.blast_radius) normalized.blast_radius   = f.blast_radius;
+    if (f.chain_elevation) normalized.chain_elevation = f.chain_elevation;
+    return normalized;
+  });
 }
+
+// ── Confidence scoring ────────────────────────────────────────────────────────
+
+/**
+ * Compute an evidence-quality confidence score (1–5) for a finding.
+ * Purely programmatic — examines the fields present on the finding object.
+ * Does NOT ask the LLM; this is the anti-hallucination guard.
+ *
+ * Criteria (each worth 1 point):
+ *   1. Specific file path cited  (component or file field contains '.')
+ *   2. Specific line number cited (component contains ':<digits>' or line field set)
+ *   3. PoC is deterministic       (poc field present, or reliability === 'deterministic')
+ *   4. CVSS mathematically verified (cvss_verified === true or tags includes 'cvss-verified')
+ *   5. Chain depth ≤ 3 hops       (chain_hops unset/≤3; unset = single-hop = safe)
+ *
+ * @param {object} finding — raw or normalized finding object
+ * @returns {1|2|3|4|5}
+ */
+export function computeConfidence(finding) {
+  let score = 0;
+
+  // 1. Specific file reference
+  const comp = finding.component ?? finding.file ?? '';
+  if (comp && /\.[a-z]{1,5}(:|$)/i.test(comp)) score++;
+
+  // 2. Line number
+  if (finding.line || /:\d+$/.test(comp)) score++;
+
+  // 3. PoC or deterministic verification
+  if (finding.poc || finding.reliability === 'deterministic' ||
+      (typeof finding.evidence === 'string' && /\bpoc\b|proof.of.concept/i.test(finding.evidence))) {
+    score++;
+  }
+
+  // 4. CVSS mathematically verified
+  if (finding.cvss_verified === true ||
+      (Array.isArray(finding.tags) && finding.tags.includes('cvss-verified'))) {
+    score++;
+  }
+
+  // 5. Chain depth acceptable (no unverified long hops)
+  if (!finding.chain_hops || finding.chain_hops <= 3) score++;
+
+  return /** @type {1|2|3|4|5} */ (Math.min(5, Math.max(1, score)));
+}
+
+export const CONFIDENCE_LABELS = /** @type {Record<number,string>} */ ({
+  5: 'CONFIRMED',
+  4: 'HIGH',
+  3: 'MEDIUM',
+  2: 'LOW',
+  1: 'SPECULATIVE',
+});
 
 // ── SARIF 2.1.0 export ────────────────────────────────────────────────────────
 

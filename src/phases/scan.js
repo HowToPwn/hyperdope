@@ -1,5 +1,6 @@
 import { readFileSync, existsSync, readdirSync, statSync } from 'fs';
-import { join, resolve, extname } from 'path';
+import { join, resolve, extname }                          from 'path';
+import { execSync }                                        from 'child_process';
 
 const OSV_BATCH_URL  = 'https://api.osv.dev/v1/querybatch';
 const OSV_BATCH_SIZE = 500;
@@ -300,6 +301,187 @@ function detectSecrets(dir) {
   return secrets;
 }
 
+// ── Ghost Endpoint Discovery ─────────────────────────────────────────────────
+//
+// Parse `git log -p` for removed route/handler definitions — routes that existed
+// in the git history but are no longer in the current codebase. On multi-node or
+// rolling deployments, old instances may still serve them.
+//
+// This is a niche differentiating feature: standard SAST tools only see current
+// code; ghost endpoint discovery surfaces the historical attack surface.
+
+const GHOST_ROUTE_RE = [
+  // Express / Koa / Fastify / Connect — any HTTP verb
+  /^-\s*(?:app|router|server|express|fastify|koa)\s*\.\s*(get|post|put|delete|patch|head|options)\s*\(/i,
+  // NestJS / TypeScript decorators
+  /^-\s*@(Get|Post|Put|Delete|Patch|Options|Head)\s*\(/,
+  // Flask Python routes
+  /^-\s*@\w+\.route\s*\(/i,
+  /^-\s*@bp\.route\s*\(/i,
+  // Django urls.py
+  /^-\s*(?:url|path|re_path)\s*\(\s*r?['"]/i,
+  // Go net/http or chi/gorilla
+  /^-.*\b(?:mux|r|router)\s*\.\s*Handle(?:Func)?\s*\(/i,
+  // Rails routes.rb
+  /^-\s*(?:get|post|put|delete|patch|resources?|namespace|mount)\s+['"`]/i,
+  // FastAPI Python
+  /^-\s*@(?:app|router)\s*\.\s*(?:get|post|put|delete|patch|options)\s*\(/i,
+  // Hapi.js
+  /^-\s*server\.route\s*\(\s*\{/i,
+];
+
+/**
+ * Analyse git history for route definitions removed from source files.
+ * Returns an array of ghost endpoint objects (capped at 25 to avoid noise).
+ *
+ * @param {string} dir — resolved absolute project directory
+ * @returns {{ file: string, removed_definition: string, commit: string }[]}
+ */
+function detectGhostEndpoints(dir) {
+  // 1. Verify we're inside a git repository
+  try {
+    execSync('git rev-parse --git-dir', { cwd: dir, stdio: 'ignore', timeout: 3000 });
+  } catch {
+    return [];
+  }
+
+  // 2. Pull diff of deleted/modified source lines from the last year
+  let diff = '';
+  try {
+    diff = execSync(
+      'git log --diff-filter=MD -p --since="1 year ago" ' +
+      '-- "*.js" "*.ts" "*.jsx" "*.tsx" "*.py" "*.go" "*.rb" "*.java" "*.php"',
+      { cwd: dir, encoding: 'utf8', timeout: 8000, maxBuffer: 3 * 1024 * 1024 },
+    );
+  } catch {
+    return [];
+  }
+
+  const found  = new Map();      // key → finding object
+  let currentFile   = '';
+  let currentCommit = '';
+
+  for (const line of diff.split('\n')) {
+    // git log one-liner: <hash> <subject>
+    if (/^[0-9a-f]{7,40} /.test(line)) {
+      currentCommit = line.trim().slice(0, 72);
+    }
+    // diff header: --- a/<path>
+    const fileMatch = line.match(/^--- a\/(.+)$/);
+    if (fileMatch) { currentFile = fileMatch[1]; continue; }
+
+    // Skip additions and context lines — we only care about removals (-)
+    if (!line.startsWith('-')) continue;
+
+    for (const re of GHOST_ROUTE_RE) {
+      if (re.test(line)) {
+        const key = `${currentFile}::${line.trim().slice(0, 80)}`;
+        if (!found.has(key)) {
+          found.set(key, {
+            file:               currentFile,
+            removed_definition: line.trim().slice(0, 120),
+            commit:             currentCommit,
+          });
+        }
+        break;
+      }
+    }
+  }
+
+  return [...found.values()].slice(0, 25);
+}
+
+// ── Blast Radius via Registry APIs ───────────────────────────────────────────
+//
+// For CVE findings, we fetch monthly download counts from npm/PyPI to surface
+// "this package has 12.3M downloads/month" in the report. This contextualises
+// severity — a vuln in a massively-used package is more urgent to patch even
+// if its CVSS score is identical to one in a niche library.
+//
+// APIs:
+//   npm  — https://api.npmjs.org/downloads/point/last-month/<pkg>  (free, no auth)
+//   PyPI — https://pypistats.org/api/packages/<pkg>/recent         (free, no auth)
+
+const BLAST_TIER_THRESHOLDS = [
+  { tier: 'massive', min: 1_000_000 },
+  { tier: 'high',    min: 100_000 },
+  { tier: 'medium',  min: 10_000 },
+  { tier: 'low',     min: 0 },
+];
+
+function blastTier(n) {
+  for (const { tier, min } of BLAST_TIER_THRESHOLDS) {
+    if (n >= min) return tier;
+  }
+  return 'low';
+}
+
+/**
+ * Fetch monthly download count for one package from npm or PyPI.
+ * Returns null on any error or timeout (3 s).
+ *
+ * @param {string} name
+ * @param {'npm'|'PyPI'} ecosystem
+ * @returns {Promise<{monthly_downloads:number,tier:string,source:string}|null>}
+ */
+async function fetchBlastRadius(name, ecosystem) {
+  try {
+    const signal = AbortSignal.timeout(3000);
+    let url, extract;
+
+    if (ecosystem === 'npm') {
+      url     = `https://api.npmjs.org/downloads/point/last-month/${encodeURIComponent(name)}`;
+      extract = d => d.downloads;
+    } else if (ecosystem === 'PyPI') {
+      url     = `https://pypistats.org/api/packages/${encodeURIComponent(name.toLowerCase())}/recent`;
+      extract = d => d.data?.last_month;
+    } else {
+      return null;
+    }
+
+    const resp = await fetch(url, { signal });
+    if (!resp.ok) return null;
+    const data  = await resp.json();
+    const count = extract(data);
+    if (typeof count !== 'number' || count < 0) return null;
+    return { monthly_downloads: count, tier: blastTier(count), source: ecosystem };
+  } catch {
+    return null;
+  }
+}
+
+// ── Dependency Confusion Detection ───────────────────────────────────────────
+//
+// Check whether any npm package has a name that looks like an internal private
+// package (common pattern: no scope prefix + internal/private/corp suffix) and
+// may be squattable on the public registry.
+//
+// This is a purely static, heuristic check — no network needed.
+
+const INTERNAL_PACKAGE_RE = /(?:^|-|_)(?:internal|private|corp|local|intranet|infra|platform)(?:$|-|_)/i;
+const SCOPED_RE            = /^@/;
+
+/**
+ * Detect packages that may be vulnerable to dependency confusion attacks.
+ * @param {{ name:string, ecosystem:string }[]} packages
+ * @returns {{ name:string, ecosystem:string, reason:string }[]}
+ */
+function detectDependencyConfusion(packages) {
+  const suspects = [];
+  for (const p of packages) {
+    if (p.ecosystem !== 'npm')  continue;
+    if (SCOPED_RE.test(p.name)) continue;       // scoped packages are OK
+    if (INTERNAL_PACKAGE_RE.test(p.name)) {
+      suspects.push({
+        name:      p.name,
+        ecosystem: p.ecosystem,
+        reason:    `Name "${p.name}" contains internal/private naming pattern — may be squattable on npm`,
+      });
+    }
+  }
+  return suspects.slice(0, 10);   // cap to 10 to avoid noise on large monorepos
+}
+
 // ── SBOM lite ────────────────────────────────────────────────────────────────
 
 /** Generate a minimal SBOM-lite listing all resolved packages. */
@@ -358,7 +540,28 @@ export async function runScan({ target, context = {} }) {
   const cargoPkgs = parseCargoLock(dir);
   if (cargoPkgs.length > 0) { packages.push(...cargoPkgs); ecosystems.add('crates.io'); }
 
-  // ── 2. Postinstall hook detection (npm) ──────────────────────────────────
+  // ── 2. Ghost endpoint discovery (git history) ───────────────────────────
+  const ghostRaw     = detectGhostEndpoints(dir);
+  const ghostFindings = ghostRaw.map((g, i) => ({
+    id:                 `GHOST-${String(i + 1).padStart(3, '0')}`,
+    osv_id:             null,
+    aliases:            [],
+    package:            g.file,
+    version:            'removed',
+    ecosystem:          'ghost-endpoint',
+    summary:            `Removed route definition — may still be live on older deployments: ${g.removed_definition.slice(0, 80)}`,
+    severity:           'LOW',
+    fixed_in:           'verify old deployments are decommissioned or route is intentionally removed',
+    references:         [
+      'https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/02-Configuration_and_Deployment_Management_Testing/04-Review_Old_Backup_and_Unreferenced_Files_for_Sensitive_Information',
+    ],
+    file:               g.file,
+    removed_definition: g.removed_definition,
+    commit:             g.commit,
+    ghost:              true,
+  }));
+
+  // ── 4. Postinstall hook detection (npm) ──────────────────────────────────
   const hookFindings = detectPostinstallHooks(dir).map((h, i) => ({
     id:        `HOOK-${String(i + 1).padStart(3, '0')}`,
     osv_id:    null,
@@ -391,19 +594,38 @@ export async function runScan({ target, context = {} }) {
     match_preview: s.match_preview,
   }));
 
-  // ── 4. No packages + no secrets + no hooks ───────────────────────────────
-  if (packages.length === 0 && hookFindings.length === 0 && secretFindings.length === 0) {
+  // ── 5. Dependency confusion detection ────────────────────────────────────
+  const confusionSuspects = detectDependencyConfusion(packages);
+  const confusionFindings = confusionSuspects.map((c, i) => ({
+    id:        `CONFUSE-${String(i + 1).padStart(3, '0')}`,
+    osv_id:    null,
+    aliases:   [],
+    package:   c.name,
+    version:   'n/a',
+    ecosystem: c.ecosystem,
+    summary:   c.reason,
+    severity:  'MEDIUM',
+    fixed_in:  'scope the package name (@yourorg/package-name) or publish a placeholder to the public registry',
+    references: [
+      'https://dhiyaneshgeek.github.io/web/security/2021/09/04/dependency-confusion/',
+      'https://medium.com/@alex.birsan/dependency-confusion-4a5d60fec610',
+    ],
+  }));
+
+  // ── 6. No packages + no secrets + no hooks ───────────────────────────────
+  if (packages.length === 0 && hookFindings.length === 0 && secretFindings.length === 0
+      && ghostFindings.length === 0) {
     return {
       phase:    'scan',
       status:   'partial',
       findings: [],
       context:  { ...context, scan: JSON.stringify({ error: 'No supported lockfiles found', target: dir }) },
       raw:      `No lockfiles found in ${dir}. Supported: package-lock.json, package.json, requirements.txt, poetry.lock, Pipfile.lock, go.mod, Cargo.lock`,
-      meta:     { packages_scanned: 0, vulnerabilities_found: 0, secrets_found: 0, hooks_found: 0, ecosystems: [], target: dir },
+      meta:     { packages_scanned: 0, vulnerabilities_found: 0, secrets_found: 0, hooks_found: 0, ghost_endpoints_found: 0, confusion_suspects: 0, ecosystems: [], target: dir },
     };
   }
 
-  // ── 5. Deduplicate packages ───────────────────────────────────────────────
+  // ── 7. Deduplicate packages ───────────────────────────────────────────────
   const seen = new Set();
   packages = packages.filter(p => {
     const key = `${p.ecosystem}:${p.name}@${p.version}`;
@@ -412,10 +634,10 @@ export async function runScan({ target, context = {} }) {
     return true;
   });
 
-  // ── 6. SBOM generation ────────────────────────────────────────────────────
+  // ── 8. SBOM generation ────────────────────────────────────────────────────
   const sbom = buildSbom(packages, dir);
 
-  // ── 7. OSV vulnerability scan ─────────────────────────────────────────────
+  // ── 9. OSV vulnerability scan ─────────────────────────────────────────────
   let osvFindings = [];
   let osvError    = null;
 
@@ -455,13 +677,49 @@ export async function runScan({ target, context = {} }) {
     }
   }
 
-  // ── 8. Merge all findings ─────────────────────────────────────────────────
-  const allFindings = [...osvFindings, ...hookFindings, ...secretFindings];
-  const raw         = JSON.stringify({
-    packages_scanned:   packages.length,
-    vulnerabilities:    osvFindings,
-    hooks:              hookFindings,
-    secrets:            secretFindings,
+  // ── 10. Blast radius enrichment (async, best-effort) ─────────────────────
+  //
+  // For the top 8 vulnerable packages (prioritised by severity), fetch monthly
+  // download counts so the report can surface "12.3M downloads/month" context.
+  // We cap at 8 requests and use a 3s AbortSignal to never block the scan.
+  const SEVERITY_RANK = { CRITICAL: 4, HIGH: 3, MEDIUM: 2, LOW: 1 };
+  const enrichCandidates = osvFindings
+    .filter(f => f.ecosystem === 'npm' || f.ecosystem === 'PyPI')
+    .sort((a, b) => (SEVERITY_RANK[b.severity] ?? 0) - (SEVERITY_RANK[a.severity] ?? 0))
+    .slice(0, 8);
+
+  const blastMap = new Map();   // pkg name → blast_radius object
+  if (enrichCandidates.length > 0) {
+    await Promise.all(
+      enrichCandidates.map(async f => {
+        if (blastMap.has(f.package)) return;
+        const br = await fetchBlastRadius(f.package, f.ecosystem);
+        if (br) blastMap.set(f.package, br);
+      }),
+    );
+  }
+
+  // Attach blast_radius to matching OSV findings
+  for (const f of osvFindings) {
+    if (blastMap.has(f.package)) f.blast_radius = blastMap.get(f.package);
+  }
+
+  // ── 11. Merge all findings ────────────────────────────────────────────────
+  const allFindings = [
+    ...osvFindings,
+    ...hookFindings,
+    ...secretFindings,
+    ...confusionFindings,
+    ...ghostFindings,
+  ];
+
+  const raw = JSON.stringify({
+    packages_scanned:        packages.length,
+    vulnerabilities:         osvFindings,
+    hooks:                   hookFindings,
+    secrets:                 secretFindings,
+    dependency_confusion:    confusionFindings,
+    ghost_endpoints:         ghostFindings,
     sbom,
     ...(osvError ? { osv_error: osvError } : {}),
   }, null, 2);
@@ -473,13 +731,15 @@ export async function runScan({ target, context = {} }) {
     context:  { ...context, scan: raw },
     raw,
     meta: {
-      packages_scanned:      packages.length,
-      vulnerabilities_found: osvFindings.length,
-      secrets_found:         secretFindings.length,
-      hooks_found:           hookFindings.length,
-      ecosystems:            [...ecosystems],
-      target:                dir,
-      sbom_components:       packages.length,
+      packages_scanned:       packages.length,
+      vulnerabilities_found:  osvFindings.length,
+      secrets_found:          secretFindings.length,
+      hooks_found:            hookFindings.length,
+      ghost_endpoints_found:  ghostFindings.length,
+      confusion_suspects:     confusionFindings.length,
+      ecosystems:             [...ecosystems],
+      target:                 dir,
+      sbom_components:        packages.length,
       ...(osvError ? { osv_error: osvError } : {}),
     },
     sbom,
