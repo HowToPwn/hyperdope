@@ -174,10 +174,10 @@ jobs:
       - name: TruffleHog scan (full git history)
         # Pinned to a specific commit SHA for supply-chain integrity.
         # Update periodically: https://github.com/trufflesecurity/trufflehog/releases
-        uses: trufflesecurity/trufflehog@f5b4455703bda4994e95e1abab27edd08fba7a8a
+        uses: trufflesecurity/trufflehog@20652fbbdefffcdaa493a5bf57ab2ac6b1db715b
         with:
           path: ./
-          base: ${{ github.event.repository.default_branch }}
+          base: ${{ github.event.before }}
           extra_args: --only-verified --exclude-paths=.trufflehog-exclude
 
       - name: Supplemental regex scan (non-verified patterns)
@@ -268,6 +268,9 @@ jobs:
                 const line = lines[lineNo - 1]?.trim() ?? '';
                 // Skip if it's in a comment
                 if (line.startsWith('//') || line.startsWith('*')) continue;
+                // Skip if the token appears inside a string literal (e.g. defensive guard: k === '__proto__')
+                const prevCh = src[m.index - 1]; const nextCh = src[m.index + m[0].length];
+                if ((prevCh === "'" || prevCh === '"') && (nextCh === "'" || nextCh === '"')) continue;
                 console.error(`[-] ${file}:${lineNo} — dangerous sink [${label}]: ${line.slice(0, 80)}`);
                 failed = true;
               }
