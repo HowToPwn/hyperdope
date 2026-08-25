@@ -7,8 +7,6 @@
 Report via GitHub's private security advisory system:
 **[Report a vulnerability](https://github.com/HowToPwn/hyperdope/security/advisories/new)**
 
-Or email: **security@howto.wtf** (PGP key available on request — preferred for Critical/High findings)
-
 ---
 
 ## Scope
