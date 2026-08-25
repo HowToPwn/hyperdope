@@ -6,7 +6,70 @@ import { withRetry } from '../retry.js';
 
 const OPENAI_COMPAT = new Set(['openai', 'glm', 'kimi', 'qwen', 'gpt']);
 
+// ── base_url SSRF guard ───────────────────────────────────────────────────────
+
+/** Cloud metadata endpoints that must never be targeted. */
+const BLOCKED_HOSTS = new Set([
+  '169.254.169.254',           // AWS / Azure IMDS
+  'metadata.google.internal',  // GCP metadata
+  '100.100.100.200',           // Alibaba Cloud metadata
+  'fd00:ec2::254',             // AWS IMDS IPv6
+]);
+
+/** RFC 1918 private IP ranges — not valid LLM provider endpoints. */
+const PRIVATE_RE = [
+  /^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/,
+  /^172\.(1[6-9]|2\d|30|31)\.\d{1,3}\.\d{1,3}$/,
+  /^192\.168\.\d{1,3}\.\d{1,3}$/,
+];
+
+/**
+ * Validate a base_url before any outbound HTTP request.
+ *
+ * Rules:
+ *   - Must be a syntactically valid URL.
+ *   - Must use HTTPS, OR HTTP only when the host is localhost / 127.0.0.1 / ::1
+ *     (covers local Ollama deployments).
+ *   - Must not target cloud metadata endpoints.
+ *   - Must not target RFC 1918 private IP ranges.
+ *
+ * These checks close the SSRF vector where a caller-controlled base_url causes
+ * the server to make credentialed requests to internal or metadata services.
+ */
+function validateBaseUrl(baseUrl) {
+  if (!baseUrl) return;
+
+  let url;
+  try {
+    url = new URL(baseUrl);
+  } catch {
+    throw new Error(`base_url is not a valid URL: ${baseUrl}`);
+  }
+
+  const isLoopback =
+    url.hostname === 'localhost' ||
+    url.hostname === '127.0.0.1' ||
+    url.hostname === '::1';
+
+  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && isLoopback)) {
+    throw new Error(
+      `base_url must use HTTPS (or HTTP for localhost/127.0.0.1 only). Got: ${baseUrl}`
+    );
+  }
+
+  if (BLOCKED_HOSTS.has(url.hostname)) {
+    throw new Error(`base_url targets a blocked metadata host: ${url.hostname}`);
+  }
+
+  if (PRIVATE_RE.some(re => re.test(url.hostname))) {
+    throw new Error(`base_url must not target private IP ranges: ${url.hostname}`);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 export async function callProvider(config, { system, user }) {
+  validateBaseUrl(config.base_url);
   const params = {
     system,
     user,

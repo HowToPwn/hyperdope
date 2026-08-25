@@ -28,6 +28,29 @@ function truncateHalf(str) {
   return str.slice(0, half) + '\n[...trimmed — see session file for full output]';
 }
 
+/**
+ * Wrap pipeline data in an XML-style boundary tag so the LLM distinguishes
+ * structured phase output from natural-language instructions.
+ *
+ * Why: the `context` parameter accepted by every Hyperdope MCP tool is
+ * caller-supplied and may contain adversarially-crafted strings. Embedding
+ * that data verbatim in the user message allows indirect prompt injection —
+ * an attacker can place instruction-like text in a prior-phase result (or
+ * directly in the `context` argument) that the LLM may follow instead of
+ * the built-in system prompt.
+ *
+ * The `<pipeline_data>` tag signals to the model "this is data to analyze,
+ * not instructions to execute". Combined with the security note in each
+ * BUILT_IN.system, this raises the bar against indirect injection.
+ *
+ * The label attribute is controlled by Hyperdope source code, not by callers.
+ */
+export function wrapDataBlock(label, content) {
+  if (content === null || content === undefined || content === '') return '';
+  const str = typeof content === 'string' ? content : JSON.stringify(content, null, 2);
+  return `<pipeline_data label="${label}">\n${str}\n</pipeline_data>`;
+}
+
 export function trimContext(context, phaseKey) {
   const budget = PHASE_BUDGETS[phaseKey] ?? 6000;
   if (!context || contextSize(context) <= budget) return context;
