@@ -21,17 +21,17 @@ export function readSession(filePath) {
 }
 
 export function writePhaseToSession(filePath, phaseName, result) {
-  mkdirSync(SESSIONS_DIR, { recursive: true });
+  mkdirSync(SESSIONS_DIR, { recursive: true, mode: 0o700 });
 
   const existing = readSession(filePath);
   existing[phaseName] = result;
   existing._updated = new Date().toISOString();
 
-  writeFileSync(filePath, JSON.stringify(existing, null, 2), 'utf8');
+  writeFileSync(filePath, JSON.stringify(existing, null, 2), { encoding: 'utf8', mode: 0o600 });
 }
 
 export function initSession(target, agentPath) {
-  mkdirSync(SESSIONS_DIR, { recursive: true });
+  mkdirSync(SESSIONS_DIR, { recursive: true, mode: 0o700 });
   const ts = newSessionTimestamp();
   const fp = sessionPath(ts);
   const data = {
@@ -40,6 +40,6 @@ export function initSession(target, agentPath) {
     _target: target,
     _agent: agentPath,
   };
-  writeFileSync(fp, JSON.stringify(data, null, 2), 'utf8');
+  writeFileSync(fp, JSON.stringify(data, null, 2), { encoding: 'utf8', mode: 0o600 });
   return fp;
 }
