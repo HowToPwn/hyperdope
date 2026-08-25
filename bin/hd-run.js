@@ -35,11 +35,11 @@ import {
   runDraftGhsa, runDisclose, runScan, runVerify,
 } from '../src/phases/index.js';
 import {
-  Spinner, println, gap, printDivider, printDivider as div,
-  printHeader, printSection, printKv, printFinding,
+  Spinner, println, gap, printDivider,
+  printHeader, printKv,
   printPassBanner, printFailBanner, phaseSummary,
-  bold, dim, red, green, yellow, cyan, bRed, bGreen,
-  phaseLabel, severityBadge, severityColor, USE_TTY,
+  bold, dim, red, cyan,
+  phaseLabel, severityBadge, severityColor,
 } from '../src/tui.js';
 
 // ── Phase registry ────────────────────────────────────────────────────────────

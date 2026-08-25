@@ -17,7 +17,7 @@ import {
   Spinner, println, gap, printDivider, printHeader,
   printKv, printFinding, printPassBanner, printFailBanner,
   phaseSummary, bold, dim, red, green, yellow, cyan,
-  bRed, bGreen, bYellow, severityBadge, severityColor, USE_COLOR,
+  severityBadge, severityColor,
 } from './tui.js';
 
 // ── Severity ordering ─────────────────────────────────────────────────────────
@@ -57,20 +57,6 @@ function parseArgs(argv) {
   }
 
   return args;
-}
-
-// ── Formatted finding list ────────────────────────────────────────────────────
-
-function printFindings(findings, label, emptyMsg) {
-  if (findings.length === 0) {
-    println(`  ${dim('○')}  ${dim(emptyMsg)}`);
-    return;
-  }
-  println(`  ${bold(label)}  ${dim(`(${findings.length})`)}`);
-  gap();
-  for (let i = 0; i < findings.length; i++) {
-    printFinding(findings[i], i);
-  }
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -159,10 +145,7 @@ export async function runCi(argv = process.argv.slice(2)) {
         gap();
         println(`  ${severityBadge(sev)} ${bold(String(group.length) + ' finding' + (group.length === 1 ? '' : 's'))}`);
         for (let i = 0; i < group.length; i++) {
-          const f = group[i];
-          const title = (f.title ?? '').slice(0, 62);
-          println(`    ${dim('·')} ${title}`);
-          if (f.component) println(`        ${dim(f.component)}`);
+          printFinding(group[i], i);
         }
       }
       gap();

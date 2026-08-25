@@ -286,14 +286,19 @@ function detectSecrets(dir) {
   }
 
   // Scan one level deep for files with sensitive extensions (avoid recursion into node_modules)
+  //
+  // Each file is stat'd individually inside its own try-catch to handle TOCTOU:
+  // a file may be deleted (or replaced by a symlink) between readdirSync and statSync.
+  // Without the inner catch, one vanished entry would throw and abort the entire loop.
   try {
     for (const entry of readdirSync(dir)) {
       if (SKIP_DIRS.has(entry)) continue;
-      const fp   = join(dir, entry);
-      const stat = statSync(fp);
+      const fp = join(dir, entry);
+      let stat;
+      try { stat = statSync(fp); } catch { continue; }   // file removed after readdir (TOCTOU guard)
       if (!stat.isFile()) continue;
       if (SCAN_EXTENSIONS.has(extname(entry).toLowerCase())) {
-        try { scanContent(fp, readFileSync(fp, 'utf8')); } catch { /* skip */ }
+        try { scanContent(fp, readFileSync(fp, 'utf8')); } catch { /* skip unreadable */ }
       }
     }
   } catch { /* unreadable dir */ }

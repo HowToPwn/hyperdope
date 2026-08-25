@@ -172,10 +172,13 @@ jobs:
           fetch-depth: 0
 
       - name: TruffleHog scan (full git history)
-        uses: trufflesecurity/trufflehog@main
+        # Pinned to a specific commit SHA for supply-chain integrity.
+        # Update periodically: https://github.com/trufflesecurity/trufflehog/releases
+        uses: trufflesecurity/trufflehog@f5b4455703bda4994e95e1abab27edd08fba7a8a
         with:
           path: ./
-          extra_args: --only-verified
+          base: ${{ github.event.repository.default_branch }}
+          extra_args: --only-verified --exclude-paths=.trufflehog-exclude
 
       - name: Supplemental regex scan (non-verified patterns)
         run: |
@@ -189,7 +192,11 @@ jobs:
             ["generic-high-entropy"]='[A-Za-z0-9+/]{40,}={0,2}'
           )
           for label in "${!PATTERNS[@]}"; do
-            HITS=$(grep -rEn "${PATTERNS[$label]}" src/ bin/ --include="*.js" 2>/dev/null || true)
+            # --exclude-dir=internal excludes src/internal/ which contains intentional
+            # honeypot credential strings (fake, non-functional) used for testing the
+            # secret-detection pipeline itself. Scanning them causes false positives.
+            HITS=$(grep -rEn "${PATTERNS[$label]}" src/ bin/ --include="*.js" \
+              --exclude-dir=internal 2>/dev/null || true)
             if [ -n "$HITS" ]; then
               echo "[-] Potential $label detected:"
               echo "$HITS"
@@ -246,9 +253,9 @@ jobs:
           ];
 
           let failed = false;
-          // Exclude src/phases/ — those are LLM prompt templates; security terms
-          // like __proto__, eval(), constructor[ appear as string content, not code.
-          const files = walk('src', ['phases']).concat(walk('bin'));
+          // Exclude src/phases/ — LLM prompt templates; security terms appear as string content.
+          // Exclude src/internal/ — intentional honeypot files (fake credentials for pipeline testing).
+          const files = walk('src', ['phases', 'internal']).concat(walk('bin'));
 
           for (const file of files) {
             const src = readFileSync(file, 'utf8');

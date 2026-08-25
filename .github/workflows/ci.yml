@@ -36,6 +36,9 @@ jobs:
           node --check src/server.js
           node --check src/config.js
           node --check src/session.js
+          node --check src/schema.js
+          node --check src/tui.js
+          node --check src/ci.js
           node --check src/cvss.js
           node --check src/retry.js
           node --check src/context.js
@@ -53,6 +56,7 @@ jobs:
           node --check src/phases/draft_ghsa.js
           node --check src/phases/disclose.js
           node --check src/phases/scan.js
+          node --check src/phases/verify.js
 
   test:
     name: Tests (Node ${{ matrix.node }})
@@ -73,7 +77,16 @@ jobs:
         run: npm ci
 
       - name: Run unit tests
-        run: node --test test/*.test.js
+        run: |
+          # Use nullglob so an empty test/ directory doesn't pass a literal glob
+          # string to node --test (which would ENOENT on all Node versions).
+          shopt -s nullglob
+          tests=(test/*.test.js)
+          if [ ${#tests[@]} -eq 0 ]; then
+            echo "[+] No test files found — skipping unit tests"
+          else
+            node --test "${tests[@]}"
+          fi
 
       - name: Verify server starts and registers all tools
         run: |
