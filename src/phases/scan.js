@@ -1,4 +1,4 @@
-import { readFileSync, existsSync, readdirSync, openSync, fstatSync, closeSync, lstatSync, constants } from 'fs';
+import { readFileSync, existsSync, readdirSync, openSync, fstatSync, closeSync, constants } from 'fs';
 import { join, resolve, extname }                          from 'path';
 import { execSync }                                        from 'child_process';
 
@@ -278,13 +278,11 @@ function detectSecrets(dir) {
   }
 
   // Scan explicit high-value filenames
-  // Open via fd with O_NOFOLLOW and reject symlinks to prevent reading host files outside the repository
+  // Open via fd with O_NOFOLLOW to atomically prevent symlink following (closes TOCTOU race)
   for (const name of SCAN_FILES) {
     const fp = join(dir, name);
     let fd;
     try {
-      const st = lstatSync(fp);
-      if (st.isSymbolicLink() || !st.isFile()) continue;
       fd = openSync(fp, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
       if (!fstatSync(fd).isFile()) continue;
       scanContent(fp, readFileSync(fd, 'utf8'));
@@ -306,8 +304,6 @@ function detectSecrets(dir) {
       const fp = join(dir, entry);
       let fd;
       try {
-        const st = lstatSync(fp);
-        if (st.isSymbolicLink() || !st.isFile()) continue;
         fd = openSync(fp, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
         if (!fstatSync(fd).isFile()) continue;
         scanContent(fp, readFileSync(fd, 'utf8'));

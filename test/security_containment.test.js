@@ -6,15 +6,16 @@ import { join, resolve, relative, isAbsolute } from 'path';
 import { runScan } from '../src/phases/scan.js';
 
 test('Security: detectSecrets rejects symlinks in SCAN_FILES pointing to host files', async () => {
-  const tmp = mkdtempSync(join(tmpdir(), 'hd-test-symlink-'));
-  const hostSecretFile = join(tmpdir(), `host-secret-${Date.now()}.env`);
+  const tmpHost = mkdtempSync(join(tmpdir(), 'hd-host-secret-'));
+  const tmpTarget = mkdtempSync(join(tmpdir(), 'hd-test-target-'));
+  const hostSecretFile = join(tmpHost, 'secret.env');
   
   try {
-    // Write host secret outside target directory
-    writeFileSync(hostSecretFile, 'AWS_KEY=AKIAIOSFODNN7EXAMPLE\n');
+    // Write host secret inside an isolated secure temporary directory
+    writeFileSync(hostSecretFile, 'AWS_KEY=AKIAIOSFODNN7EXAMPLE\n', { mode: 0o600 });
 
     // Create target directory with symlink .env pointing to host secret
-    const symlinkPath = join(tmp, '.env');
+    const symlinkPath = join(tmpTarget, '.env');
     try {
       symlinkSync(hostSecretFile, symlinkPath, 'file');
     } catch {
@@ -22,15 +23,15 @@ test('Security: detectSecrets rejects symlinks in SCAN_FILES pointing to host fi
       return;
     }
 
-    const result = await runScan({ target: tmp });
+    const result = await runScan({ target: tmpTarget });
     
-    // Secret should NOT be detected because symlink is rejected via lstatSync/O_NOFOLLOW
+    // Secret should NOT be detected because symlink is rejected via O_NOFOLLOW
     const detectedSecrets = result.findings.filter(f => f.type === 'AWS Access Key ID');
     assert.equal(detectedSecrets.length, 0, 'Symlinked host secret must not be read or extracted');
     assert.equal(result.meta.secrets_found, 0, 'No secrets should be found via symlinks');
   } finally {
-    rmSync(tmp, { recursive: true, force: true });
-    rmSync(hostSecretFile, { force: true });
+    rmSync(tmpHost, { recursive: true, force: true });
+    rmSync(tmpTarget, { recursive: true, force: true });
   }
 });
 

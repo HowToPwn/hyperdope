@@ -1,6 +1,6 @@
 {
   "name": "hyperdope",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "MCP server for adversarial security research — 6-phase pipeline from profile to disclosure",
   "type": "module",
   "bin": {
