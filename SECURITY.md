@@ -1,4 +1,4 @@
-# Security Policy — hyperdope
+# Security Policy - hyperdope
 
 ## Reporting a Vulnerability
 
@@ -9,138 +9,161 @@ Report via GitHub's private security advisory system:
 
 ---
 
+## Trust Model
+
+Understanding the trust model is required before submitting. Misclassifying a finding against the wrong boundary wastes everyone's time.
+
+| Principal | Trust level |
+| --- | --- |
+| Operator | Full trust - controls `agent.yaml`, environment variables, Node options, working directory |
+| LLM provider (Anthropic, OpenAI, etc.) | Untrusted network peer - responses are parsed, not executed |
+| Scan target | Untrusted - the directory or repository being analysed |
+| MCP client (Claude Desktop, etc.) | Semi-trusted - invokes tools with arguments; arguments are validated but not operator-level |
+
+A finding that requires the attacker to already be the operator is **not a finding**. A finding that requires the attacker to control the LLM's output must demonstrate an exploitable consequence beyond the LLM producing unexpected text.
+
+---
+
 ## Scope
 
 ### In scope
 
-| Target | Examples |
+| Target | Qualifying finding class |
 | --- | --- |
-| MCP server source (`src/`) | Arbitrary code execution, auth bypass, path traversal, prototype pollution |
-| Provider adapters (`src/providers/`) | API key exposure, credential leakage through error messages or logs |
-| Session file handling (`src/session.js`) | Unauthorized read/write of `.hyperdope/sessions/`, path traversal to arbitrary files |
-| Phase prompt engine (`src/phases/`) | Prompt injection that causes the server to exfiltrate caller data or execute unintended tool calls |
-| OSV scan module (`src/phases/scan.js`) | SSRF via crafted target path, dependency confusion via package name manipulation |
-| CVSS calculator (`src/cvss.js`) | Logic errors producing incorrect scores that cause systematic misclassification of severity |
-| Config loader (`src/config.js`) | Env var injection, YAML deserialization issues, path traversal via `agent` parameter |
-| Direct dependencies only | CVE with CVSS v3.1 Base Score ≥ 7.0, confirmed to be reachable through hyperdope's code paths |
+| MCP server (`src/server.js`) | Tool argument escapes validation and causes code execution or file access outside the declared target |
+| Phase engine (`src/phases/`) | Prompt injection via scan target content that causes measurable data exfiltration or tool invocation outside expected phase flow |
+| OSV scan module (`src/phases/scan.js`) | SSRF that reaches a non-public resource; path traversal that reads files outside the declared target directory with evidence |
+| Session manager (`src/session.js`) | Session file readable by another local user on a multi-tenant host; path traversal to arbitrary file |
+| Config loader (`src/config.js`) | YAML deserialization that achieves prototype pollution with exploitable downstream effect; path traversal via `agent` parameter |
+| Provider adapters (`src/providers/`) | API key or credential present in logged output, error messages, or returned tool content under normal operation |
+| Direct dependencies | CVE with CVSS v3.1 Base Score ≥ 8.5, confirmed reachable through hyperdope's actual call graph, with a working PoC demonstrating impact |
 
 ### Out of scope
 
-The following will be **rejected without acknowledgement** unless accompanied by a working PoC that proves exploitability through hyperdope specifically:
+The following are **closed without response** unless accompanied by a working PoC that proves exploitability through hyperdope specifically with no operator-level prerequisites:
 
-- Vulnerabilities in LLM provider APIs (Anthropic, OpenAI, Google, etc.) — report directly to them
-- Issues that require a compromised or malicious `agent.yaml` supplied by the operator
-- Rate limiting, throttling, or brute-force surface on provider APIs
-- Denial-of-service via resource exhaustion (token flooding, large payloads)
-- Social engineering, phishing, or attacks on hyperdope contributors
-- Scanner output (Burp Suite, Nuclei, Semgrep, Bandit, etc.) without manual triage and confirmed exploitability
-- Theoretical vulnerabilities without a working PoC — "this *could* lead to..." is not a finding
-- Vulnerabilities in `node_modules` already publicly listed in NVD/OSV without a confirmed reachable code path
-- Self-XSS or issues requiring the attacker to already have operator-level access
-- Missing HTTP security headers (hyperdope is an MCP server, not an HTTP service)
+- Any issue where the attacker prerequisite is write access to `agent.yaml`, environment variables, or Node startup flags - that is operator-level trust
+- Issues in `src/internal/` - this directory is intentional dead code used for pipeline testing; findings there carry zero weight
+- MCP tool parameter injection where the injecting party is the LLM itself - the LLM is already semi-trusted
+- Vulnerabilities in LLM provider APIs - report directly to Anthropic, OpenAI, or Google
+- Findings that require `NODE_ENV=development`, `--inspect`, or other debug flags not present in the published npm package
+- Scanner output (Semgrep, CodeQL, Snyk, Trivy, Nuclei, Bandit, etc.) without manual triage confirming actual exploitability
+- Direct dependency CVEs with CVSS < 8.5 or without a demonstrated reachable path through hyperdope's code
+- Transitive dependency CVEs regardless of severity - we do not control their fix timelines
+- Denial-of-service via resource exhaustion (token flooding, oversized payloads, OSV API abuse)
+- Rate limiting or brute-force surface on provider APIs
+- Missing HTTP security headers - hyperdope is an MCP stdio server, not an HTTP service
+- Findings that only reproduce on a modified or locally-patched build, not against the published npm package
+- Theoretical attack chains that require multiple independent low-probability conditions - model it, calculate the AC, and if it's AC:H the bar for PoC is higher, not optional
 - Version disclosure in error messages
-- Issues in `agent.example.yaml` that only affect operators who ignore documented security guidance
+- Social engineering or attacks on contributors
+- The LLM producing "harmful" security research content - hyperdope is a security tool; prompt engineering outputs are not vulnerabilities
 
 ---
 
 ## Submission Requirements
 
-**Non-compliant reports will be closed without response.** Every submission must include:
+**Non-compliant reports are closed without response.** Every submission must include all five sections below.
 
 ### 1. Affected component
-File path, function name, and line number(s). "The server is vulnerable" is not a valid component reference.
+
+File path, function name, and line number(s) in the **published npm package** (not just the GitHub source). If the line numbers differ between source and published package, include both.
 
 ### 2. Root cause
-One paragraph: the exact code path, the missing or incorrect check, and the invariant that is violated.
 
-### 3. Working PoC
+One paragraph: the exact code path from attacker-controlled input to vulnerable sink, the missing or incorrect check, and the invariant that is violated. Reference the CWE (e.g. CWE-22, CWE-918, CWE-1333). "The server is vulnerable" is not a root cause.
+
+### 3. Attacker model
+
+State explicitly:
+- What trust level the attacker holds (see Trust Model above)
+- What prerequisites they need (local access, network position, MCP client access, etc.)
+- What they do not need (e.g. "does not require operator credentials")
+
+### 4. Working PoC
 
 PoC must be:
-- **Self-contained** — all code, commands, and setup steps in the report
-- **Deterministic** — reliably reproducible; not dependent on specific timing unless the vulnerability is inherently a race condition
-- **Evidence-producing** — must generate observable, unambiguous proof of exploitation (file created, data exfiltrated, process spawned, error message revealing sensitive data, etc.)
-- **Non-destructive** — demonstrates impact without permanently harming the test environment
+- **Self-contained** - all code, commands, and setup in the report; no external dependencies beyond the npm package itself
+- **Deterministic** - reliably reproducible; timing-dependent PoCs must include a statistical reproduction rate
+- **Evidence-producing** - must generate unambiguous proof of exploitation: a file created, data exfiltrated to stdout/stderr, a process spawned, or a measurable incorrect computation
+- **Tested against the published package** - run `npm install -g hyperdope` and reproduce against that, not a local dev build
 
-**Minimum PoC structure:**
+**Required PoC structure:**
+
 ```
-## Prerequisites
-[Environment, Node version, dependencies]
+## Attacker prerequisites
+[Trust level, access required, environment]
 
 ## Steps
 1. ...
 2. ...
 
-## Expected output (exploited)
-[Exact output or state that proves exploitation]
+## Evidence of exploitation
+[Exact output, file content, or observable state that proves the finding]
 
-## Expected output (not exploited / patched)
-[What a fixed version shows]
+## Evidence against a patched build
+[What the fixed version shows - e.g. error thrown, access denied]
 ```
 
-### 4. Impact statement
-What does an attacker achieve? Be specific: "read arbitrary files from the filesystem" is acceptable. "could potentially be misused" is not.
-
 ### 5. CVSS v3.1 vector string
-Provide `CVSS:3.1/AV:_/AC:_/PR:_/UI:_/S:_/C:_/I:_/A:_`. We will independently verify using the mathematical calculator. Submissions with vector strings that don't match the described impact will be rescored.
+
+Provide `CVSS:3.1/AV:_/AC:_/PR:_/UI:_/S:_/C:_/I:_/A:_` with justification for each metric. We verify independently. Vectors that don't match the described attacker model will be rescored - if our rescore changes the severity band, our SLA applies to our score, not yours.
 
 ---
 
 ## Severity Thresholds and Response SLA
 
-| Severity | CVSS Score | Acknowledgement | Fix Target |
+| Severity | CVSS Score | Acknowledgement | Fix target |
 | --- | --- | --- | --- |
 | Critical | 9.0 – 10.0 | 24 hours | 7 days |
 | High | 7.0 – 8.9 | 48 hours | 30 days |
 | Medium | 4.0 – 6.9 | 72 hours | 90 days |
 | Low | 0.1 – 3.9 | 7 days | Best effort |
 
-SLA starts from the date of first acknowledgement, not submission date.
+SLA starts from first acknowledgement, not submission date.
 
-**If we miss an SLA:** you may request a status update. If no response within 7 days of a status request, you may disclose with 72 hours notice.
+**Reporter unresponsive:** if we cannot reproduce the issue and receive no response to a clarification request within 21 days, the report is closed. Researchers may reopen with additional detail.
+
+**If we miss an SLA:** you may request a status update. If no response within 7 days of that request, you may disclose with 72 hours notice.
+
+---
+
+## Duplicate and Variant Policy
+
+- First reporter only is credited for a given root cause
+- A finding that shares the same root cause as an open or patched issue is a duplicate regardless of the affected function or file - fix the root, all variants close
+- A variant that introduces a materially different exploit primitive (e.g. read → write) is treated as a distinct finding with its own SLA
 
 ---
 
 ## Disclosure Policy
 
-- We follow **90-day coordinated disclosure**
-- We will work with you to understand and reproduce the issue before requesting embargo extensions
+- We follow **90-day coordinated disclosure** from first acknowledgement
 - We will not request embargo beyond 120 days total without your explicit agreement
 - We will credit you in the fix commit, release notes, and Hall of Fame (unless you request anonymity)
 - We will open a GitHub Security Advisory and request a CVE ID for confirmed Critical/High findings
+- Partial fixes (mitigations that reduce severity but do not close the root cause) are disclosed as such - we will not represent a mitigation as a complete fix
 
-**We do not pay monetary bounties.** This is an open-source project. Recognition, attribution, and a detailed Hall of Fame entry are the rewards we offer.
+**We do not pay monetary bounties.** This is an open-source security research tool. Recognition, attribution, and a Hall of Fame entry are what we offer.
 
 ---
 
-## What We Will NOT Do
+## What We Will Not Do
 
-- We will not pursue legal action against researchers who follow this policy
-- We will not contact your employer, ISP, or any third party about a good-faith disclosure
-- We will not silently fix a reported vulnerability without crediting the reporter
+- Pursue legal action against researchers who follow this policy
+- Contact your employer, ISP, or any third party about a good-faith disclosure
+- Silently fix a reported vulnerability without crediting the reporter
+- Close a valid finding because it is inconvenient or makes the project look bad
 
-**Safe Harbor:** Security research conducted in accordance with this policy is authorized. We consider it a contribution to the project.
+**Safe Harbor:** Security research conducted in accordance with this policy is authorized. We consider it a contribution.
 
 ---
 
 ## Hall of Fame
 
-Researchers who report valid Critical or High findings are listed here.
+Researchers who report confirmed Critical or High findings are listed here: https://hyperdope.ai.studio/
 
-*No entries yet — be the first.*
-
----
-
-## Non-Qualifying Submissions
-
-Reports will be **closed immediately** if they consist of:
-
-- Output from automated scanners without manual validation
-- CVE IDs for dependencies without demonstrating a reachable, exploitable path through hyperdope's code
-- Issues that require the attacker to control the `agent.yaml` file (operator-level trust)
-- Findings already reported by another researcher (first reporter only)
-- Issues in the LLM provider's API or infrastructure
-- Missing `Content-Security-Policy` or similar HTTP headers (not applicable to an MCP stdio server)
-- The LLM producing "harmful" content — hyperdope is a security research tool; prompt engineering is not a vulnerability
+*No entries yet - be the first.*
 
 ---
 
