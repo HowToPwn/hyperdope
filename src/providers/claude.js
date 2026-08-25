@@ -13,3 +13,4 @@ export async function complete({ system, user, model, api_key, max_tokens = 8192
 
   return msg.content.map(b => (b.type === 'text' ? b.text : '')).join('');
 }
+//dummy text
