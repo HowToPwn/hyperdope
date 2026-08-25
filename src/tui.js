@@ -39,14 +39,6 @@ function rgb(r, g, b, fallback4, str) {
     : `\x1b[${fallback4}m${str}\x1b[0m`;
 }
 
-/** 24-bit RGB background, falling back to a 4-bit BG code. */
-function rgbBg(r, g, b, fallback4, str) {
-  if (!USE_COLOR) return str;
-  return HAS_TRUE_COLOR
-    ? `\x1b[48;2;${r};${g};${b}m${str}\x1b[0m`
-    : `\x1b[${fallback4}m${str}\x1b[0m`;
-}
-
 // ── Base style helpers ────────────────────────────────────────────────────────
 
 export const reset   = str => USE_COLOR ? `\x1b[0m${str}\x1b[0m` : str;

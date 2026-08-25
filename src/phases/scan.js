@@ -1,4 +1,4 @@
-import { readFileSync, existsSync, readdirSync, statSync } from 'fs';
+import { readFileSync, existsSync, readdirSync, lstatSync } from 'fs';
 import { join, resolve, extname }                          from 'path';
 import { execSync }                                        from 'child_process';
 
@@ -288,14 +288,14 @@ function detectSecrets(dir) {
   // Scan one level deep for files with sensitive extensions (avoid recursion into node_modules)
   //
   // Each file is stat'd individually inside its own try-catch to handle TOCTOU:
-  // a file may be deleted (or replaced by a symlink) between readdirSync and statSync.
+  // a file may be deleted (or replaced by a symlink) between readdirSync and lstatSync.
   // Without the inner catch, one vanished entry would throw and abort the entire loop.
   try {
     for (const entry of readdirSync(dir)) {
       if (SKIP_DIRS.has(entry)) continue;
       const fp = join(dir, entry);
       let stat;
-      try { stat = statSync(fp); } catch { continue; }   // file removed after readdir (TOCTOU guard)
+      try { stat = lstatSync(fp); } catch { continue; }   // file removed after readdir (TOCTOU guard); lstat does not follow symlinks
       if (!stat.isFile()) continue;
       if (SCAN_EXTENSIONS.has(extname(entry).toLowerCase())) {
         try { scanContent(fp, readFileSync(fp, 'utf8')); } catch { /* skip unreadable */ }
@@ -430,6 +430,8 @@ function blastTier(n) {
  * @returns {Promise<{monthly_downloads:number,tier:string,source:string}|null>}
  */
 async function fetchBlastRadius(name, ecosystem) {
+  // Validate name is a safe package identifier before embedding in URL
+  if (!/^(@[a-zA-Z0-9_-]+\/)?[a-zA-Z0-9._-]+$/.test(name)) return null;
   try {
     const signal = AbortSignal.timeout(3000);
     let url, extract;
