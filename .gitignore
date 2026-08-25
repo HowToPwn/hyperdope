@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+
+# Runtime / build artifacts
+dist/
+*.tgz
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# Internal / private documentation (not for public repo)
+honeypot_escape.md
+prompt.md
+notepad.txt
+commit_message.txt
+release.md
+
+# Claude Code session files
+.agents/
+.claude/
+
+# Photos / assets (internal branding)
+src/photos/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Coverage / test output
+coverage/
+.nyc_output/
