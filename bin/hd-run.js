@@ -23,8 +23,8 @@
  *   2  — Invalid arguments or config error
  */
 
-import { writeFileSync, readFileSync, existsSync } from 'fs';
-import { resolve } from 'path';
+import { writeFileSync, readFileSync, existsSync, realpathSync } from 'fs';
+import { resolve, relative, isAbsolute } from 'path';
 
 import { loadAgentConfig }    from '../src/config.js';
 import { callProvider }       from '../src/providers/index.js';
@@ -260,13 +260,29 @@ async function main() {
 
   if (args.resumeFrom) {
     if (!args.sessionFile) die('--resume-from requires --session-file');
-    if (!existsSync(args.sessionFile)) die(`session-file not found: ${args.sessionFile}`);
+    const cwd = process.cwd();
+    const absSession = resolve(args.sessionFile);
+    const relSession = relative(cwd, absSession);
+    if (relSession.startsWith('..') || isAbsolute(relSession)) {
+      die(`session-file traverses outside working directory: ${args.sessionFile}`);
+    }
+    if (!existsSync(absSession)) die(`session-file not found: ${args.sessionFile}`);
+    try {
+      const realCwd = realpathSync(cwd);
+      const realSession = realpathSync(absSession);
+      const relReal = relative(realCwd, realSession);
+      if (relReal.startsWith('..') || isAbsolute(relReal)) {
+        die(`session-file resolves outside working directory: ${args.sessionFile}`);
+      }
+    } catch {
+      die(`session-file cannot be accessed: ${args.sessionFile}`);
+    }
     if (!FULL_PIPELINE.includes(args.resumeFrom)) {
       die(`Invalid resume phase "${args.resumeFrom}". Valid: ${FULL_PIPELINE.join(' | ')}`);
     }
 
     try {
-      const sessionData = JSON.parse(readFileSync(args.sessionFile, 'utf8'));
+      const sessionData = JSON.parse(readFileSync(absSession, 'utf8'));
       for (const name of FULL_PIPELINE) {
         if (name === args.resumeFrom) break;
         const pr = sessionData.phases?.[name];

@@ -1,6 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { existsSync, readFileSync } from 'fs';
+import { existsSync, readFileSync, realpathSync } from 'fs';
+import { resolve, relative, isAbsolute } from 'path';
 import { loadAgentConfig } from './config.js';
 import { callProvider } from './providers/index.js';
 import {
@@ -47,6 +48,34 @@ const runInput = z.object({
   session_file: z.string().optional()
     .describe('Path to an existing .hyperdope-session.json file produced by a prior hd_run. Used with resume_from.'),
 });
+
+/**
+ * Enforce that session_file stays within the current working directory and does
+ * not escape via path traversal or symlinks.
+ */
+function validateSessionPath(sessionFile) {
+  const cwd = process.cwd();
+  const absPath = resolve(sessionFile);
+  const rel = relative(cwd, absPath);
+  if (rel.startsWith('..') || isAbsolute(rel)) {
+    throw new Error(`session_file traverses outside working directory: "${sessionFile}"`);
+  }
+  if (!existsSync(absPath)) {
+    throw new Error(`session_file not found: ${sessionFile}`);
+  }
+  try {
+    const realCwd = realpathSync(cwd);
+    const realSession = realpathSync(absPath);
+    const relReal = relative(realCwd, realSession);
+    if (relReal.startsWith('..') || isAbsolute(relReal)) {
+      throw new Error(`session_file resolves outside working directory: "${sessionFile}"`);
+    }
+  } catch (err) {
+    if (err.message.includes('outside working directory')) throw err;
+    throw new Error(`session_file cannot be accessed: ${sessionFile}`);
+  }
+  return absPath;
+}
 
 // ── Phase handler factory ─────────────────────────────────────────────────────
 
@@ -202,19 +231,22 @@ export function createServer() {
           };
         }
 
-        if (!existsSync(session_file)) {
+        let absSession;
+        try {
+          absSession = validateSessionPath(session_file);
+        } catch (err) {
           return {
             content: [{
               type: 'text',
               text: JSON.stringify({
-                error: `session_file not found: ${session_file}`,
+                error: err.message,
               }, null, 2),
             }],
           };
         }
 
         try {
-          const sessionData = JSON.parse(readFileSync(session_file, 'utf8'));
+          const sessionData = JSON.parse(readFileSync(absSession, 'utf8'));
           // Merge all completed phase contexts into initialCtx
           for (const phaseName of PHASE_NAMES) {
             if (phaseName === resume_from) break; // stop at resume point
@@ -231,7 +263,6 @@ export function createServer() {
               type: 'text',
               text: JSON.stringify({
                 error: `Failed to read session file: ${err.message}`,
-                session_file,
               }, null, 2),
             }],
           };

@@ -1,4 +1,4 @@
-import { readFileSync, existsSync, readdirSync, openSync, fstatSync, closeSync, constants } from 'fs';
+import { readFileSync, existsSync, readdirSync, openSync, fstatSync, closeSync, lstatSync, constants } from 'fs';
 import { join, resolve, extname }                          from 'path';
 import { execSync }                                        from 'child_process';
 
@@ -278,11 +278,18 @@ function detectSecrets(dir) {
   }
 
   // Scan explicit high-value filenames
+  // Open via fd with O_NOFOLLOW and reject symlinks to prevent reading host files outside the repository
   for (const name of SCAN_FILES) {
     const fp = join(dir, name);
-    if (existsSync(fp)) {
-      try { scanContent(fp, readFileSync(fp, 'utf8')); } catch { /* skip unreadable */ }
-    }
+    let fd;
+    try {
+      const st = lstatSync(fp);
+      if (st.isSymbolicLink() || !st.isFile()) continue;
+      fd = openSync(fp, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+      if (!fstatSync(fd).isFile()) continue;
+      scanContent(fp, readFileSync(fd, 'utf8'));
+    } catch { /* file removed, unreadable, or symlink (ELOOP on O_NOFOLLOW) */ }
+    finally { if (fd !== undefined) try { closeSync(fd); } catch {} }
   }
 
   // Scan one level deep for files with sensitive extensions (avoid recursion into node_modules)
@@ -299,6 +306,8 @@ function detectSecrets(dir) {
       const fp = join(dir, entry);
       let fd;
       try {
+        const st = lstatSync(fp);
+        if (st.isSymbolicLink() || !st.isFile()) continue;
         fd = openSync(fp, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
         if (!fstatSync(fd).isFile()) continue;
         scanContent(fp, readFileSync(fd, 'utf8'));
