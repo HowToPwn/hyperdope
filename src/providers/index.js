@@ -57,12 +57,30 @@ function validateBaseUrl(baseUrl) {
     );
   }
 
+  // Block 0.0.0.0 — resolves to all-interfaces or loopback depending on OS,
+  // neither of which is a valid LLM provider endpoint.
+  if (url.hostname === '0.0.0.0') {
+    throw new Error(`base_url must not target 0.0.0.0: ${baseUrl}`);
+  }
+
   if (BLOCKED_HOSTS.has(url.hostname)) {
     throw new Error(`base_url targets a blocked metadata host: ${url.hostname}`);
   }
 
   if (PRIVATE_RE.some(re => re.test(url.hostname))) {
     throw new Error(`base_url must not target private IP ranges: ${url.hostname}`);
+  }
+
+  // Block IPv4-mapped IPv6 addresses that bypass the IPv4 checks above.
+  // e.g. http://[::ffff:169.254.169.254]/ → url.hostname = '::ffff:169.254.169.254'
+  // which does NOT match '169.254.169.254' in BLOCKED_HOSTS.
+  const v4mapped = url.hostname.replace(/^\[?::ffff:/i, '').replace(/\]$/, '');
+  if (v4mapped !== url.hostname) {
+    if (BLOCKED_HOSTS.has(v4mapped) || PRIVATE_RE.some(re => re.test(v4mapped))) {
+      throw new Error(
+        `base_url must not target IMDS or private ranges via IPv4-mapped IPv6: ${baseUrl}`
+      );
+    }
   }
 }
 

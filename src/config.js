@@ -46,6 +46,10 @@ function resolveObj(obj) {
   if (typeof obj === 'object') {
     const out = {};
     for (const [k, v] of Object.entries(obj)) {
+      // Skip prototype-polluting keys. A malicious agent.yaml with key `__proto__`
+      // would cause `out['__proto__'] = ...` which writes to Object.prototype via
+      // bracket assignment on a plain object — silent global state corruption.
+      if (k === '__proto__' || k === 'constructor' || k === 'prototype') continue;
       out[k] = resolveObj(v);
     }
     return out;
