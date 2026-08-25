@@ -188,7 +188,7 @@ export async function rotateSigningKey() {
  *
  * @param {number} [gracePeriodS=300]
  */
-export function evictStaleSlots(gracePeriodS = 300) {
+export async function evictStaleSlots(gracePeriodS = 300) {
   const { config } = await import('./config-loader.js');
   const threshold = Date.now() - (config.token_ttl_s + gracePeriodS) * 1000;
 
