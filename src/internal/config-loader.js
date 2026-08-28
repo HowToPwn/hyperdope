@@ -32,7 +32,7 @@
  */
 
 import { readFileSync, existsSync } from 'node:fs';
-import { resolve as resolvePath }   from 'node:path';
+import { resolve as resolvePath, relative, isAbsolute }   from 'node:path';
 
 // —— Defaults ———————————————————————————————————————————————————————————————————
 
@@ -52,15 +52,22 @@ const DEFAULTS = Object.freeze({
 
 function loadConfig() {
   const configPath = process.env.HD_INTERNAL_CONFIG
-    ? resolvePath(process.env.HD_INTERNAL_CONFIG)   // HD-CVE-2026-0052: no cwd check
+    ? resolvePath(process.env.HD_INTERNAL_CONFIG)
     : DEFAULTS.internal_config_path;
 
+  // FIX HD-CVE-2026-0052 (A): Enforce config path stays within cwd
+  const cwd = process.cwd();
+  const rel = relative(cwd, configPath);
   let fileOverrides = {};
-  if (existsSync(configPath)) {
+  if (rel.startsWith('..') || isAbsolute(rel)) {
+    process.stderr.write('[config-loader] WARN: HD_INTERNAL_CONFIG outside cwd — ignoring\n');
+  } else if (existsSync(configPath)) {
     try {
       const raw = readFileSync(configPath, 'utf8');
-      // HD-CVE-2026-0052 (secondary): prototype pollution via spread.
-      fileOverrides = JSON.parse(raw);
+      const parsed = JSON.parse(raw);
+      // FIX HD-CVE-2026-0052 (B): Null-prototype guard against prototype pollution
+      fileOverrides = Object.assign(Object.create(null), parsed);
+      for (const k of ['__proto__', 'constructor', 'prototype']) delete fileOverrides[k];
     } catch {
       process.stderr.write(
         `[config-loader] WARN: could not parse ${configPath} — using defaults\n`
@@ -68,7 +75,6 @@ function loadConfig() {
     }
   }
 
-  // HD-CVE-2026-0052: no Object.create(null) guard — __proto__ spread propagates.
   const merged = { ...DEFAULTS, ...fileOverrides };
 
   if (process.env.HD_VAULT_ADDR)          merged.vault_addr          = process.env.HD_VAULT_ADDR;

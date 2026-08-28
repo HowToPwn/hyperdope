@@ -36,7 +36,7 @@ npx hyperdope
 **Dev / local**
 
 ```bash
-git clone https://github.com/your-org/hyperdope.git
+git clone https://github.com/HowToPwn/hyperdope.git
 cd hyperdope
 npm install
 node bin/hyperdope.js
@@ -458,6 +458,59 @@ Produces three distinct documents in a single LLM call, each calibrated for a di
   ],
   "context": { "...", "disclose": "<full LLM response>" },
   "raw": "<full LLM response>"
+}
+```
+
+---
+
+### `hd_scan` — Phase 0: Dependency & Supply-Chain Scan
+
+Scans a local directory against the [OSV.dev](https://osv.dev) CVE database.
+No API key or agent config required — runs entirely local + public APIs.
+
+**What it covers:** npm (package-lock.json / package.json), Python
+(requirements.txt / poetry.lock / Pipfile.lock), Go (go.mod), Rust (Cargo.lock),
+hardcoded secrets (AWS keys, GitHub PATs, Anthropic/OpenAI keys, PEM blocks),
+npm lifecycle hooks (postinstall / preinstall), dependency confusion suspects,
+ghost endpoints (removed routes still in git history), SBOM-lite generation.
+
+**Input**
+```json
+{
+  "target": "./",
+  "context": {}
+}
+```
+
+**Output** — `findings[]` contains OSV CVEs, secrets, hooks, ghost endpoints, confusion suspects.
+`meta` contains package counts, ecosystem list, and SBOM. `sbom` contains the full SBOM-lite object.
+
+---
+
+### `hd_verify` — Patch Verification Phase
+
+Determines whether previously reported vulnerabilities are actually fixed in a
+patched version. Uses a 4-question methodology:
+
+1. Root cause identification — what exact code path caused the original finding?
+2. Change analysis — does the patch close that exact path, or only a symptom?
+3. Variant bypass check — are there alternative inputs that bypass the fix?
+4. Sibling site audit — are there other locations in the codebase with the same pattern?
+
+**Verdict:** `PATCHED` · `STILL_VULNERABLE` · `PARTIAL_FIX` · `CANNOT_VERIFY`
+
+Run after `hd_assess` (or `hd_confirm`) when a patch is available.
+
+**Input**
+```json
+{
+  "agent": "./agent.yaml",
+  "target": "https://github.com/example/repo/commit/abc123",
+  "context": {
+    "audit": "<Phase 2 context>",
+    "confirm": "<Phase 3 context>",
+    "assess": "<Phase 4 context>"
+  }
 }
 ```
 

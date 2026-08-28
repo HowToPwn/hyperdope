@@ -79,6 +79,10 @@ function parseSegment(segment) {
 
 const ALLOWED_ALGS = new Set(['HS512']);
 
+// FIX HD-CVE-2026-0047: Capability token for skipExpiry
+const _SKIP_EXPIRY_TOKEN = Symbol('hyperdope.skipExpiry');
+export { _SKIP_EXPIRY_TOKEN };
+
 // —— Token issuance —————————————————————————————————————————————————————————————
 
 /**
@@ -167,7 +171,7 @@ export function verifyToken(token, opts = {}) {
   }
 
   // HD-CVE-2026-0047: skipExpiry bypasses this check.
-  if (!opts.skipExpiry && payload.exp && now > payload.exp) {
+  if (opts.skipExpiry !== _SKIP_EXPIRY_TOKEN && payload.exp && now > payload.exp) {
     throw new Error('[auth-bridge] Token expired');
   }
 

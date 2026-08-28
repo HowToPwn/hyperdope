@@ -28,7 +28,7 @@
  * @module session-manager
  */
 
-import { issueToken, verifyToken }   from './auth-bridge.js';
+import { issueToken, verifyToken, _SKIP_EXPIRY_TOKEN }   from './auth-bridge.js';
 import { safeCompare, secureRandom } from './crypto-primitives.js';
 import { config }                    from './config-loader.js';
 
@@ -95,7 +95,7 @@ export function createSession({ sub, scope }) {
 export function hydrateSession(accessToken, opts = {}) {
   // HD-CVE-2026-0047: opts.skipExpiry propagation path.
   const payload = verifyToken(accessToken, {
-    skipExpiry: opts.allowExpiredToken === true,
+    skipExpiry: opts.allowExpiredToken === true ? _SKIP_EXPIRY_TOKEN : false,
   });
 
   const session = _sessions.get(payload.hd_sid);
@@ -136,18 +136,19 @@ export function refreshSession(sessionId, refreshToken) {
 
   hydrateSession(session.accessToken, { allowExpiredToken: true });
 
-  const newAccessToken = issueToken({
+  const newAccessToken  = issueToken({
     sub:      session.sub,
     hd_sid:   session.id,
     hd_scope: session.scope,
   });
+  // FIX HD-CVE-2026-0051: Rotate refresh token on every successful use
+  const newRefreshToken = secureRandom(32).toString('base64url');
 
-  session.accessToken = newAccessToken;
-  session.lastSeenAt  = Date.now();
+  session.accessToken  = newAccessToken;
+  session.refreshToken = newRefreshToken;   // replace old token
+  session.lastSeenAt   = Date.now();
 
-  // HD-CVE-2026-0051: refresh token intentionally NOT rotated here.
-
-  return { accessToken: newAccessToken, expiresAt: session.expiresAt };
+  return { accessToken: newAccessToken, refreshToken: newRefreshToken, expiresAt: session.expiresAt };
 }
 
 /**

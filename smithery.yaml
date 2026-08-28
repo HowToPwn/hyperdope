@@ -1,0 +1,64 @@
+name: hyperdope
+displayName: Hyperdope — Adversarial Security Research Pipeline
+description: |
+  6-phase agentic security pipeline: attack surface profiling, vulnerability
+  hunting, PoC generation, CVSS v3.1 scoring, GHSA drafting, and coordinated
+  disclosure. Also includes Phase 0 dependency scan (OSV.dev) and patch
+  verification. Supports Claude, GPT-4o, Gemini, Ollama, and any
+  OpenAI-compatible provider.
+version: "0.3.1"
+license: MIT
+homepage: https://github.com/HowToPwn/hyperdope
+repository: https://github.com/HowToPwn/hyperdope
+author:
+  name: HowToPwn
+  url: https://github.com/HowToPwn
+categories:
+  - security
+  - code-analysis
+  - devtools
+tags:
+  - security-research
+  - vulnerability-scanner
+  - cvss
+  - ghsa
+  - osv
+  - disclosure
+  - pentest
+  - code-audit
+  - sarif
+  - sbom
+icon: "🔮"
+startCommand:
+  type: stdio
+  command: npx
+  args: ["hyperdope"]
+  env:
+    CLAUDE_API_KEY:
+      description: Anthropic API key (required if using provider=claude)
+      required: false
+    OPENAI_API_KEY:
+      description: OpenAI API key (required if using provider=openai)
+      required: false
+    HYPERDOPE_AGENT:
+      description: Path to agent.yaml config file (alternative to passing --agent per call)
+      required: false
+tools:
+  - name: hd_scan
+    description: Phase 0 — Dependency CVE scan, secret detection, supply-chain hooks, ghost endpoints. No LLM required.
+  - name: hd_profile
+    description: Phase 1 — STRIDE threat model, attack surface mapping, data flow tracing.
+  - name: hd_audit
+    description: Phase 2 — 5-step adversarial vulnerability hunt. OWASP Top 10 + LLM Top 10.
+  - name: hd_confirm
+    description: Phase 3 — Minimal deterministic PoC generation with reliability rating.
+  - name: hd_assess
+    description: Phase 4 — CVSS v3.1 scoring with chain-of-thought per metric. Mathematically verified.
+  - name: hd_draft_ghsa
+    description: Phase 5 — GitHub Security Advisory draft following GHSA schema exactly.
+  - name: hd_disclose
+    description: Phase 6 — Coordinated disclosure package. Executive brief + technical advisory + vendor email.
+  - name: hd_verify
+    description: Patch verification — PATCHED / STILL_VULNERABLE / PARTIAL_FIX / CANNOT_VERIFY verdict.
+  - name: hd_run
+    description: Full pipeline runner — all 6 phases sequentially with auto context chaining. Resumable.

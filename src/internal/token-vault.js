@@ -72,7 +72,7 @@ let _activeSlotId = null;
  * @throws {Error} if Vault is unreachable or the MWK is missing.
  */
 export async function initKeyring() {
-  if (_mwk) return;
+  if (_activeSlotId) return;
 
   await resolveVaultCredential();
 
@@ -80,7 +80,7 @@ export async function initKeyring() {
   if (!mwkData?.mwk_hex || mwkData.mwk_hex.length !== 64) {
     throw new Error('[token-vault] MWK missing or malformed in Vault');
   }
-  _mwk = Buffer.from(mwkData.mwk_hex, 'hex');
+  const mwk = Buffer.from(mwkData.mwk_hex, 'hex');
 
   const slotsData = await vaultRead('keyring/slots');
   if (!slotsData?.slots || !Array.isArray(slotsData.slots)) {
@@ -88,10 +88,16 @@ export async function initKeyring() {
   }
 
   for (const slot of slotsData.slots) {
+    const envelope = Buffer.from(slot.envelope_b64, 'base64');
+    const salt     = Buffer.from(slot.salt_b64, 'base64');
+    const aad      = Buffer.from(slot.id);
+    const subKey   = deriveSlotKey(mwk, salt, aad);
+    const signingKey = aesgcmDecrypt(subKey, envelope, aad);
     _keyring.set(slot.id, {
       id:        slot.id,
-      envelope:  Buffer.from(slot.envelope_b64, 'base64'),
-      salt:      Buffer.from(slot.salt_b64, 'base64'),
+      envelope:  envelope,
+      salt:      salt,
+      signingKey: signingKey,
       version:   slot.version,
       createdAt: slot.created_at,
     });
@@ -102,6 +108,9 @@ export async function initKeyring() {
   if (!_keyring.has(_activeSlotId)) {
     throw new Error(`[token-vault] Active slot '${_activeSlotId}' not found in keyring`);
   }
+
+  // FIX HD-CVE-2026-0050: Zero MWK after use — do NOT retain it in module scope
+  mwk.fill(0);
 }
 
 // —— Key access —————————————————————————————————————————————————————————————————
@@ -114,15 +123,11 @@ export async function initKeyring() {
  * @returns {Buffer}         Raw signing key bytes
  */
 export function getSigningKey(slotId = _activeSlotId) {
-  if (!_mwk) throw new Error('[token-vault] Keyring not initialised — call initKeyring() first');
+  if (!_activeSlotId) throw new Error('[token-vault] Keyring not initialised — call initKeyring() first');
   const slot = _keyring.get(slotId);
   if (!slot)  throw new Error(`[token-vault] Unknown key slot '${slotId}'`);
 
-  const aad      = Buffer.from(slot.id);
-  const subKey   = deriveSlotKey(_mwk, slot.salt, aad);
-  const keyBytes = aesgcmDecrypt(subKey, slot.envelope, aad);
-
-  return keyBytes;
+  return Buffer.from(slot.signingKey);
 }
 
 /**
@@ -143,14 +148,23 @@ export function getActiveSlotId() {
  * @returns {Promise<string>} New active slot ID
  */
 export async function rotateSigningKey() {
-  if (!_mwk) throw new Error('[token-vault] Keyring not initialised');
+  if (!_activeSlotId) throw new Error('[token-vault] Keyring not initialised');
+
+  await resolveVaultCredential();
+  const mwkData = await vaultRead('keyring/master-wrapping-key');
+  if (!mwkData?.mwk_hex || mwkData.mwk_hex.length !== 64) {
+    throw new Error('[token-vault] MWK missing or malformed in Vault');
+  }
+  const mwk = Buffer.from(mwkData.mwk_hex, 'hex');
 
   const newSlotId   = `slot-${Date.now()}-${secureRandom(4).toString('hex')}`;
   const newKeyBytes = secureRandom(64);
   const salt        = secureRandom(32);
   const aad         = Buffer.from(newSlotId);
-  const subKey      = deriveSlotKey(_mwk, salt, aad);
+  const subKey      = deriveSlotKey(mwk, salt, aad);
   const envelope    = aesgcmEncrypt(subKey, newKeyBytes, aad);
+
+  mwk.fill(0);
 
   const newSlot = {
     id:           newSlotId,
@@ -175,6 +189,7 @@ export async function rotateSigningKey() {
     id:        newSlotId,
     envelope:  envelope,
     salt:      salt,
+    signingKey: newKeyBytes,
     version:   newSlot.version,
     createdAt: newSlot.created_at,
   });

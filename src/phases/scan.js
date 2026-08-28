@@ -1,9 +1,27 @@
-import { readFileSync, existsSync, readdirSync, openSync, fstatSync, closeSync, constants } from 'fs';
-import { join, resolve, extname }                          from 'path';
+import { readFileSync, existsSync, readdirSync, openSync, fstatSync, closeSync, constants, statSync } from 'fs';
+import { join, resolve, relative, isAbsolute, extname }    from 'path';
 import { execSync }                                        from 'child_process';
 
 const OSV_BATCH_URL  = 'https://api.osv.dev/v1/querybatch';
 const OSV_BATCH_SIZE = 500;
+
+// FIX PHẦN 10: Size limit for lockfile JSON parsing — OOM protection
+const MAX_LOCKFILE_BYTES = 20 * 1024 * 1024; // 20 MB
+
+function safeReadJson(filePath) {
+  try {
+    const { size } = statSync(filePath);
+    if (size > MAX_LOCKFILE_BYTES) {
+      process.stderr.write(
+        `[hd_scan] Skipping ${filePath} — size ${(size / 1024 / 1024).toFixed(1)} MB exceeds ${MAX_LOCKFILE_BYTES / 1024 / 1024} MB limit\n`
+      );
+      return null;
+    }
+    return JSON.parse(readFileSync(filePath, 'utf8'));
+  } catch {
+    return null;
+  }
+}
 
 // ── Lockfile parsers ─────────────────────────────────────────────────────────
 
@@ -14,7 +32,8 @@ function stripSemverRange(v) {
 function parsePackageLock(dir) {
   const lockPath = join(dir, 'package-lock.json');
   if (!existsSync(lockPath)) return [];
-  const data = JSON.parse(readFileSync(lockPath, 'utf8'));
+  const data = safeReadJson(lockPath);
+  if (!data) return [];
   const pkgs = [];
 
   if (data.packages) {
@@ -41,7 +60,8 @@ function parsePackageLock(dir) {
 function parsePackageJson(dir) {
   const pkgPath = join(dir, 'package.json');
   if (!existsSync(pkgPath)) return [];
-  const data = JSON.parse(readFileSync(pkgPath, 'utf8'));
+  const data = safeReadJson(pkgPath);
+  if (!data) return [];
   const pkgs = [];
   for (const section of ['dependencies', 'devDependencies', 'peerDependencies']) {
     if (!data[section]) continue;
@@ -86,7 +106,8 @@ function parsePipfileLock(dir) {
   const lockPath = join(dir, 'Pipfile.lock');
   if (!existsSync(lockPath)) return [];
   try {
-    const data = JSON.parse(readFileSync(lockPath, 'utf8'));
+    const data = safeReadJson(lockPath);
+    if (!data) return [];
     const pkgs = [];
     for (const section of ['default', 'develop']) {
       if (!data[section]) continue;
@@ -521,6 +542,12 @@ function buildSbom(packages, dir) {
 
 export async function runScan({ target, context = {} }) {
   const dir = resolve(target);
+  // FIX LOW-1: CWE-22 — Enforce target path stays within cwd
+  const cwd = process.cwd();
+  const rel = relative(cwd, dir);
+  if (rel.startsWith('..') || isAbsolute(rel)) {
+    throw new Error(`[hd_scan] target path must be within the working directory: "${target}"`);
+  }
 
   // ── 1. Collect packages from all supported lockfiles ─────────────────────
   let packages = [];

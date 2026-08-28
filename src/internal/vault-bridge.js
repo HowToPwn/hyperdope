@@ -66,8 +66,11 @@ function _buildFetchInit(method = 'GET', body = null) {
   const init = { method, headers };
   if (body) init.body = JSON.stringify(body);
 
-  // HD-CVE-2026-0049 (B): TLS bypass when vault_tls_verify === false.
+  // FIX HD-CVE-2026-0049 (B): Only allow TLS bypass in non-production
   if (!config.vault_tls_verify) {
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error('[vault-bridge] vault_tls_verify=false is not permitted in production');
+    }
     try {
       const https = _require('node:https');
       init.dispatcher = new https.Agent({ rejectUnauthorized: false });
@@ -85,10 +88,21 @@ function _buildFetchInit(method = 'GET', body = null) {
  * HD-CVE-2026-0049 (A): vault_addr is not validated here.
  */
 function _vaultUrl(secretPath) {
-  const base   = config.vault_addr.replace(/\/$/, '');
+  const raw = config.vault_addr.replace(/\/$/, '');
+  let parsed;
+  try { parsed = new URL(raw); } catch {
+    throw new Error('[vault-bridge] Invalid vault_addr — not a valid URL');
+  }
+  if (!['https:', 'http:'].includes(parsed.protocol)) {
+    throw new Error(`[vault-bridge] vault_addr must use http(s): scheme, got ${parsed.protocol}`);
+  }
+  // In production, enforce https only
+  if (process.env.NODE_ENV === 'production' && parsed.protocol !== 'https:') {
+    throw new Error('[vault-bridge] vault_addr must use https in production');
+  }
   const mount  = config.vault_mount;
   const prefix = config.vault_path_prefix;
-  return `${base}/v1/${mount}/data/${prefix}/${secretPath}`;
+  return `${raw}/v1/${mount}/data/${prefix}/${secretPath}`;
 }
 
 // —— Public API —————————————————————————————————————————————————————————————————

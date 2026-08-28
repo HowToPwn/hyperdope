@@ -136,10 +136,13 @@ export function safeCompare(a, b) {
   const bufA = Buffer.isBuffer(a) ? a : Buffer.from(String(a));
   const bufB = Buffer.isBuffer(b) ? b : Buffer.from(String(b));
 
-  // HD-CVE-2026-0053: length pre-check -> timing oracle.
-  if (bufA.length !== bufB.length) return false;
-
-  return timingSafeEqual(bufA, bufB);
+  // FIX HD-CVE-2026-0053: Pad both inputs to equal length before constant-time compare.
+  // This eliminates the timing oracle that leaked length information.
+  const len  = Math.max(bufA.length, bufB.length);
+  const padA = Buffer.concat([bufA, Buffer.alloc(len - bufA.length)]);
+  const padB = Buffer.concat([bufB, Buffer.alloc(len - bufB.length)]);
+  const equal = timingSafeEqual(padA, padB);
+  return equal && bufA.length === bufB.length;
 }
 
 // —— Key derivation —————————————————————————————————————————————————————————————

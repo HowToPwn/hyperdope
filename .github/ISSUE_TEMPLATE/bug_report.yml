@@ -1,0 +1,49 @@
+name: Bug Report
+description: Report a reproducible bug in hyperdope
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Security vulnerabilities:** use [SECURITY.md](../SECURITY.md), not this form.
+  - type: input
+    id: version
+    attributes:
+      label: Hyperdope version
+      description: Output of `npm list hyperdope` or `npx hyperdope --version`
+    validations:
+      required: true
+  - type: input
+    id: node
+    attributes:
+      label: Node.js version
+      description: Output of `node --version`
+    validations:
+      required: true
+  - type: dropdown
+    id: provider
+    attributes:
+      label: LLM provider
+      options: [claude, openai, gemini, ollama, glm, kimi, qwen, other]
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Include the tool name (hd_scan, hd_audit, etc.) and the exact error or incorrect output.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Minimal agent.yaml (no real API keys), tool call arguments, and the command you ran.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true

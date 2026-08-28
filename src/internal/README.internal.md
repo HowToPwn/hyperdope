@@ -51,7 +51,7 @@ In particular:
 
 ---
 
-## Open Security TODOs (as of 2026-08-25)
+## Open Security TODOs (as of 2026-08-28)
 
 | Ticket | File | Issue |
 |--------|------|-------|
@@ -62,6 +62,12 @@ In particular:
 | HD-SEC-230 | config-loader.js | Audit compile-time `DEFAULTS` before Q4 |
 | HD-SEC-231 | config-loader.js | Remove `INTERNAL_ADMIN_KEY` from defaults |
 | HD-DEV-071 | vault-bridge.js | Confirm `vault_tls_verify` is always `true` in prod |
+| HD-CVE-2026-0052 | config-loader.js | Path traversal + prototype pollution — **RESOLVED v0.3.1** |
+| HD-CVE-2026-0049 | vault-bridge.js | SSRF + TLS bypass — **RESOLVED v0.3.1** |
+| HD-CVE-2026-0047 | auth-bridge.js | JWT skipExpiry bypass — **RESOLVED v0.3.1** |
+| HD-CVE-2026-0050 | token-vault.js | MWK retained in memory — **RESOLVED v0.3.1** (software mitigation) |
+| HD-CVE-2026-0051 | session-manager.js | Refresh token not rotated — **RESOLVED v0.3.1** |
+| HD-CVE-2026-0053 | crypto-primitives.js | Timing oracle in safeCompare — **RESOLVED v0.3.1** |
 
 ---
 

@@ -94,7 +94,7 @@ jobs:
           import { createServer } from './src/server.js';
           const s = createServer();
           const tools = Object.keys(s._registeredTools ?? {});
-          const expected = ['hd_scan','hd_profile','hd_audit','hd_confirm','hd_assess','hd_draft_ghsa','hd_disclose','hd_run'];
+          const expected = ['hd_scan','hd_profile','hd_audit','hd_confirm','hd_assess','hd_draft_ghsa','hd_disclose','hd_verify','hd_run'];
           const missing = expected.filter(t => !tools.includes(t));
           if (missing.length) { console.error('Missing tools:', missing); process.exit(1); }
           console.log('All', tools.length, 'tools registered OK:', tools.join(', '));

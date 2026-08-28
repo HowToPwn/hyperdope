@@ -81,13 +81,39 @@ function validateSessionPath(sessionFile) {
 
 function makePhaseHandler(phaseName, runFn) {
   return async ({ agent, target, context }) => {
-    const config = loadAgentConfig(agent);
+    let config;
+    try {
+      config = loadAgentConfig(agent);
+    } catch (err) {
+      return {
+        content: [{ type: 'text', text: JSON.stringify({
+          phase:  phaseName,
+          status: 'error',
+          error:  err.message,
+          hint:   'Check that agent.yaml exists and contains valid provider/model/api_key fields.',
+        }, null, 2) }],
+        isError: true,
+      };
+    }
+
     const phaseConfig = config.phases?.[phaseName] ?? null;
-
     const trimmed = trimContext(context ?? {}, phaseName);
-    const result  = await runFn({ config, target, context: trimmed, callProvider, phaseConfig });
 
-    // Persist individual tool calls to their own session snapshot
+    let result;
+    try {
+      result = await runFn({ config, target, context: trimmed, callProvider, phaseConfig });
+    } catch (err) {
+      return {
+        content: [{ type: 'text', text: JSON.stringify({
+          phase:  phaseName,
+          status: 'error',
+          error:  err.message,
+          ...(err.stack ? { stack: err.stack.replace(/sk-[A-Za-z0-9-]{20,}/g, 'sk-[REDACTED]') } : {}),
+        }, null, 2) }],
+        isError: true,
+      };
+    }
+
     const sf = sessionPath(newSessionTimestamp());
     writePhaseToSession(sf, phaseName, result);
 
@@ -102,7 +128,28 @@ function makePhaseHandler(phaseName, runFn) {
 export function createServer() {
   const server = new McpServer({
     name:    'hyperdope',
-    version: '0.3.0',
+    version: '0.3.1',
+    instructions: `Hyperdope is a 6-phase adversarial security research pipeline.
+
+WORKFLOW:
+1. hd_scan   — Scan dependencies, secrets, hooks (no API key needed). Run this first on any local target.
+2. hd_profile — Map the attack surface (STRIDE, data flows, trust boundaries).
+3. hd_audit  — Hunt vulnerabilities (OWASP Top 10, SANS 25, LLM Top 10).
+4. hd_confirm — Generate PoCs with reliability ratings.
+5. hd_assess — Score with CVSS v3.1 (mathematically verified, not LLM-guessed).
+6. hd_draft_ghsa — Draft a GitHub Security Advisory.
+7. hd_disclose — Generate executive brief + technical advisory + vendor email.
+
+Use hd_run to execute all 6 LLM phases automatically with context chaining.
+Use hd_verify after a patch is available to confirm the fix.
+
+SETUP: An agent.yaml config file specifying provider and API key is required for
+all LLM phases (hd_profile through hd_disclose, hd_verify). hd_scan runs without it.
+
+Example agent.yaml:
+  provider: claude
+  model: claude-sonnet-4-6
+  api_key: \${CLAUDE_API_KEY}`,
   });
 
   // ── Phase 0: Dependency scan ──────────────────────────────────────────────
@@ -115,10 +162,19 @@ export function createServer() {
     'suspicious npm lifecycle hooks (postinstall / preinstall / prepare). Returns SBOM-lite.',
     scanInput.shape,
     async ({ target, context }) => {
-      const result = await runScan({ target, context: context ?? {} });
-      const sf = sessionPath(newSessionTimestamp());
-      writePhaseToSession(sf, 'scan', result);
-      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      try {
+        const result = await runScan({ target, context: context ?? {} });
+        const sf = sessionPath(newSessionTimestamp());
+        writePhaseToSession(sf, 'scan', result);
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return {
+          content: [{ type: 'text', text: JSON.stringify({
+            phase: 'scan', status: 'error', error: err.message,
+          }, null, 2) }],
+          isError: true,
+        };
+      }
     }
   );
 
@@ -191,10 +247,32 @@ export function createServer() {
     'Run after hd_assess (or hd_confirm) when a patch is available.',
     verifyInput.shape,
     async ({ agent, target, context }) => {
-      const config      = loadAgentConfig(agent);
+      let config;
+      try {
+        config = loadAgentConfig(agent);
+      } catch (err) {
+        return {
+          content: [{ type: 'text', text: JSON.stringify({
+            phase: 'verify', status: 'error', error: err.message,
+            hint: 'Check that agent.yaml exists and contains valid provider/model/api_key fields.',
+          }, null, 2) }],
+          isError: true,
+        };
+      }
       const phaseConfig = config.phases?.verify ?? null;
       const trimmed     = trimContext(context ?? {}, 'verify');
-      const result      = await runVerify({ config, target, context: trimmed, callProvider, phaseConfig });
+      let result;
+      try {
+        result = await runVerify({ config, target, context: trimmed, callProvider, phaseConfig });
+      } catch (err) {
+        return {
+          content: [{ type: 'text', text: JSON.stringify({
+            phase: 'verify', status: 'error', error: err.message,
+            ...(err.stack ? { stack: err.stack.replace(/sk-[A-Za-z0-9-]{20,}/g, 'sk-[REDACTED]') } : {}),
+          }, null, 2) }],
+          isError: true,
+        };
+      }
 
       const sf = sessionPath(newSessionTimestamp());
       writePhaseToSession(sf, 'verify', result);
@@ -213,7 +291,18 @@ export function createServer() {
     'and continues from there with full context re-loaded.',
     runInput.shape,
     async ({ agent, target, context, resume_from, session_file }) => {
-      const config      = loadAgentConfig(agent);
+      let config;
+      try {
+        config = loadAgentConfig(agent);
+      } catch (err) {
+        return {
+          content: [{ type: 'text', text: JSON.stringify({
+            phase: 'run', status: 'error', error: err.message,
+            hint: 'Check that agent.yaml exists and contains valid provider/model/api_key fields.',
+          }, null, 2) }],
+          isError: true,
+        };
+      }
 
       // ── Resume: load completed phases from session file ─────────────────
       let initialCtx = context ?? {};

@@ -8,6 +8,18 @@
     "hd-ci":     "bin/hd-ci.js",
     "hd-run":    "bin/hd-run.js"
   },
+  "main": "./src/server.js",
+  "exports": {
+    ".": {
+      "import": "./src/server.js",
+      "default": "./src/server.js"
+    },
+    "./schema": "./src/schema.js",
+    "./cvss": "./src/cvss.js",
+    "./config": "./src/config.js",
+    "./session": "./src/session.js",
+    "./providers": "./src/providers/index.js"
+  },
   "scripts": {
     "start": "node bin/hyperdope.js",
     "ci":    "node bin/hd-ci.js",
